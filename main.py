@@ -3,13 +3,14 @@ import asyncio
 from loguru import logger
 
 from config import config
-from db.database import init_db, get_session # <-- ИСПРАВЛЕНО: Прямой импорт init_db и get_session
+from db.database import init_db, get_session
 
 from core.parser import telegram_parser, TelegramParser
 from core.scheduler import scheduler
 from core.gigachat import gigachat_api
 from bots.news_bot import dp as news_dp, bot as news_bot, process_new_donor_message, start_news_bot
-from bots.admin_bot import admin_dp, admin_bot, start_admin_bot
+from bots.admin_bot import admin_dp, admin_bot, start_admin_bot # <-- admin_bot теперь импортируется
+
 from sqlalchemy.future import select
 from db.models import DonorChannel, City
 
@@ -31,7 +32,7 @@ async def main():
     logger.info("Запуск приложения Setinews...")
 
     # 1. Инициализация базы данных
-    await init_db() # <-- Вызываем напрямую
+    await init_db()
 
     # 2. Инициализация и запуск Telethon парсера
     # Добавляем обработчик сообщений из парсера в наш процессор
@@ -40,7 +41,6 @@ async def main():
 
     # 3. Запуск планировщика
     # Добавляем задачу для периодического обновления токена GigaChat
-    # Передаем callable (функцию), а не уже выполненную корутину
     scheduler.add_task(gigachat_api.get_token, 15 * 60, "Обновление токена GigaChat") # Каждые 15 минут
     # TODO: Добавить задачу для периодической проверки каналов на наличие новых постов
     # (если Telethon.events.NewMessage недостаточно для всех сценариев)
@@ -52,7 +52,7 @@ async def main():
     # Запускаем ботов в отдельных корутинах
     bot_tasks = [
         start_news_bot(),
-        start_admin_bot()
+        start_admin_bot(telegram_parser) # <-- ИСПРАВЛЕНО: Передаем telegram_parser
     ]
     
     # Запускаем ботов параллельно

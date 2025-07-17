@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 from loguru import logger
 
 from config import config
-from db.database import get_session # <-- ИСПРАВЛЕНО: Прямой импорт get_session
+from db.database import get_session
 from db.models import Post, City, DonorChannel, ChannelSetting
 from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
@@ -339,8 +339,8 @@ async def send_post_to_admin_panel(post_id: int, target_telegram_channel_id: int
         f"🚨 *Новый пост для модерации* (ID: `{post.id}`)\n"
         f"Канал назначения: `{target_telegram_channel_id}`\n"
         f"Статус: {'Реклама' if post.is_advertisement else 'Ожидает'}\n\n"
-        f"Оригинал:\n`{post.original_text[:1000]}`\n\n" # Ограничиваем длину для удобства
-        f"Предложено:\n`{post.processed_text[:1000]}`\n" # Ограничиваем длину для удобства
+        f"Оригинал:\n```\n{post.original_text[:1000]}\n```\n\n" # ИСПРАВЛЕНО: Форматирование в code block
+        f"Предложено:\n```\n{post.processed_text[:1000]}\n```\n" # ИСПРАВЛЕНО: Форматирование в code block
     )
     if post.is_advertisement:
         message_for_admin += "\n_GigaChat пометил как рекламное._"
@@ -349,6 +349,7 @@ async def send_post_to_admin_panel(post_id: int, target_telegram_channel_id: int
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
+            InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"), # НОВОЕ: Кнопка редактирования
             InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
             InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
         ]
