@@ -7,9 +7,8 @@ import os
 import datetime
 
 from config import config
-from db.database import get_session # <-- Убедитесь, что это так
+from db.database import get_session # <-- ИСПРАВЛЕНО: Прямой импорт get_session
 from db.models import DonorChannel, City, Post
-
 
 class TelegramParser:
     def __init__(self, api_id, api_hash):
