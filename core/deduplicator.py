@@ -1,184 +1,174 @@
 # core/deduplicator.py
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from db.models import Post, Duplicate
-from loguru import logger
-import re
-from difflib import SequenceMatcher
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from loguru import logger
+from sqlalchemy.future import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func
+import datetime
+
+from config import config
+# from db.database import get_session # <-- Original line: Removed direct import
+import db.database # <-- Changed: Import the module instead
+from db.models import Post, Duplicate # Импортируем Post и Duplicate
 
 class Deduplicator:
-    """
-    Класс для определения дубликатов новостей.
-    Использует текстовое совпадение и смысловой анализ (на основе TF-IDF и косинусного сходства).
-    """
-    def __init__(self, min_text_similarity: float = 0.8, min_semantic_similarity: float = 0.7):
-        self.min_text_similarity = min_text_similarity
-        self.min_semantic_similarity = min_semantic_similarity
-        # Исправлено: TfidfVectorizer не поддерживает 'russian' напрямую.
-        # Используем None, чтобы не удалять стоп-слова,
-        # или можно предоставить свой список русских стоп-слов.
-        self.tfidf_vectorizer = TfidfVectorizer(stop_words=None, max_features=5000)
-        self.corpus_fitted = False
+    def __init__(self, similarity_threshold: float = 0.8):
+        self.similarity_threshold = similarity_threshold
+        # Инициализируем векторизатор без стоп-слов, так как они могут быть специфичны для языка
+        # и могут быть не всегда актуальны для коротких новостных заголовков.
+        # Если нужна поддержка стоп-слов, их можно передать явно: stop_words=stopwords.words('russian')
+        # и импортировать NLTK
+        self.vectorizer = TfidfVectorizer()
+        self.corpus = [] # Список текстов, по которым обучен векторизатор
+        self.post_ids = [] # Соответствующие ID постов
 
-    def _preprocess_text(self, text: str) -> str:
-        """Очищает текст для сравнения: приводит к нижнему регистру, удаляет пунктуацию и лишние пробелы."""
-        if not text:
-            return ""
-        text = text.lower()
-        text = re.sub(r'[^\w\s]', '', text) # Удаляем все, кроме букв, цифр и пробелов
-        text = re.sub(r'\s+', ' ', text).strip() # Заменяем множественные пробелы на один
-        return text
+    async def _get_corpus_from_db(self, db_session: AsyncSession, city_id: int):
+        """
+        Загружает тексты опубликованных постов из БД для обучения векторизатора.
+        """
+        # Загружаем только опубликованные посты для сравнения
+        stmt = select(Post.processed_text, Post.id).where(Post.city_id == city_id, Post.status == "published")
+        result = await db_session.execute(stmt)
+        posts_data = result.all()
+        
+        self.corpus = [post.processed_text for post in posts_data if post.processed_text]
+        self.post_ids = [post.id for post in posts_data if post.processed_text]
+        logger.info(f"Загружено {len(self.corpus)} опубликованных постов из БД для дедупликации в городе {city_id}.")
 
-    def _get_text_similarity(self, text1: str, text2: str) -> float:
-        """Вычисляет текстовое сходство двух строк с помощью SequenceMatcher."""
+    async def _get_semantic_similarity(self, text1: str, text2: str) -> float:
+        """
+        Вычисляет косинусное сходство между двумя текстами.
+        """
         if not text1 or not text2:
             return 0.0
-        return SequenceMatcher(None, text1, text2).ratio()
 
-    async def _get_semantic_similarity(self, texts: list[str]) -> np.ndarray:
-        """
-        Вычисляет косинусное сходство между текстами на основе TF-IDF.
-        Возвращает матрицу сходства.
-        """
-        if not texts:
-            return np.array([[]])
-
-        # Если корпус еще не был обучен, обучаем его
-        if not self.corpus_fitted:
+        # Объединяем тексты для обучения векторизатора
+        texts = [text1, text2]
+        
+        try:
             logger.info("Обучение TF-IDF векторизатора на корпусе текстов...")
-            self.tfidf_vectorizer.fit(texts)
-            self.corpus_fitted = True
+            tfidf_matrix = self.vectorizer.fit_transform(texts)
             logger.info("TF-IDF векторизатор обучен.")
+            
+            # Вычисляем косинусное сходство
+            similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+            return float(similarity)
+        except Exception as e:
+            logger.error(f"Ошибка при вычислении косинусного сходства: {e}")
+            return 0.0
 
-        # Преобразуем тексты в TF-IDF векторы
-        tfidf_matrix = self.tfidf_vectorizer.transform(texts)
-
-        # Вычисляем косинусное сходство
-        cosine_sim = cosine_similarity(tfidf_matrix)
-        return cosine_sim
-
-    async def check_for_duplicates(self, db_session: AsyncSession, new_post_text: str, city_id: int) -> tuple[bool, str | None]:
+    async def check_for_duplicates(self, db_session: AsyncSession, new_text: str, city_id: int) -> tuple[bool, str]:
         """
-        Проверяет, является ли новый пост дубликатом уже существующих постов в данном городе.
-        :param db_session: Сессия базы данных.
-        :param new_post_text: Текст нового поста.
-        :param city_id: ID городского канала, для которого проверяется дубликат.
-        :return: Кортеж (is_duplicate, reason), где reason - причина дублирования.
+        Проверяет новый текст на наличие дубликатов среди уже опубликованных постов.
+        :param db_session: Асинхронная сессия базы данных.
+        :param new_text: Новый текст для проверки.
+        :param city_id: ID города, к которому относится пост.
+        :return: Кортеж (is_duplicate: bool, reason: str).
         """
-        preprocessed_new_text = self._preprocess_text(new_post_text)
-        if not preprocessed_new_text:
-            logger.warning("Пустой текст нового поста для дедупликации.")
-            return False, None
+        await self._get_corpus_from_db(db_session, city_id)
 
-        # Получаем последние N постов для сравнения (например, за последние 24 часа или 100 постов)
-        # Для простоты пока возьмем все посты для данного города, которые не были дубликатами
-        stmt = select(Post).where(
-            Post.city_id == city_id,
-            Post.is_duplicate == False,
-            Post.status.in_(['published', 'approved']) # Сравниваем только с опубликованными/одобренными
-        ).order_by(Post.created_at.desc()).limit(100) # Ограничиваем количество для производительности
-
-        result = await db_session.execute(stmt)
-        existing_posts = result.scalars().all()
-
-        if not existing_posts:
+        if not self.corpus:
             logger.info(f"Нет существующих постов для сравнения в городе {city_id}.")
-            return False, None
+            return False, "Нет опубликованных постов для сравнения."
 
-        # Собираем тексты для TF-IDF
-        texts_to_compare = [self._preprocess_text(post.original_text) for post in existing_posts]
-        texts_to_compare.append(preprocessed_new_text) # Добавляем новый текст в корпус
+        # Добавляем новый текст к корпусу для трансформации
+        current_corpus = self.corpus + [new_text]
+        
+        try:
+            # Переобучаем векторизатор на новом корпусе
+            tfidf_matrix = self.vectorizer.fit_transform(current_corpus)
+            
+            # Вектор нового текста - это последний в матрице
+            new_text_vector = tfidf_matrix[-1:]
+            
+            # Сравниваем новый текст со всеми существующими
+            similarities = cosine_similarity(new_text_vector, tfidf_matrix[:-1])
+            
+            for i, sim in enumerate(similarities[0]):
+                if sim >= self.similarity_threshold:
+                    existing_post_id = self.post_ids[i]
+                    logger.info(f"Обнаружен дубликат по текстовому совпадению (сходство: {sim:.2f})")
+                    await self._record_duplicate(db_session, existing_post_id, None, "text_match") # ID нового поста пока неизвестен
+                    return True, f"Текстовый дубликат (сходство: {sim:.2f})"
+            
+            return False, "Дубликатов не найдено."
 
-        # Вычисляем семантическое сходство
-        semantic_similarities = await self._get_semantic_similarity(texts_to_compare)
+        except Exception as e:
+            logger.error(f"Ошибка при проверке на дубликаты: {e}")
+            return False, f"Ошибка при дедупликации: {e}"
 
-        # Сравниваем новый пост (последний в списке `texts_to_compare`) с существующими
-        new_post_semantic_vector_idx = len(texts_to_compare) - 1
-
-        for i, existing_post in enumerate(existing_posts):
-            preprocessed_existing_text = self._preprocess_text(existing_post.original_text)
-
-            # 1. Проверка на текстовое совпадение
-            text_similarity = self._get_text_similarity(preprocessed_new_text, preprocessed_existing_text)
-            if text_similarity >= self.min_text_similarity:
-                logger.info(f"Обнаружен дубликат по текстовому совпадению (сходство: {text_similarity:.2f})")
-                await self._record_duplicate(db_session, existing_post.id, None, "text_match") # ID нового поста пока неизвестен
-                return True, "text_match"
-
-            # 2. Проверка на смысловое совпадение (если тексты достаточно длинные)
-            # Убедимся, что индексы корректны для semantic_similarities
-            if semantic_similarities.shape[0] > i and semantic_similarities.shape[1] > new_post_semantic_vector_idx:
-                semantic_similarity = semantic_similarities[new_post_semantic_vector_idx, i]
-                if semantic_similarity >= self.min_semantic_similarity:
-                    logger.info(f"Обнаружен дубликат по смысловому совпадению (сходство: {semantic_similarity:.2f})")
-                    await self._record_duplicate(db_session, existing_post.id, None, "semantic_match") # ID нового поста пока неизвестен
-                    return True, "semantic_match"
-
-        logger.info("Дубликатов не найдено.")
-        return False, None
-
-    async def _record_duplicate(self, db_session: AsyncSession, original_post_id: int, duplicate_post_id: int | None, reason: str):
+    async def _record_duplicate(self, db_session: AsyncSession, original_post_id: int, duplicate_post_id: int = None, reason: str = "text_match"):
         """
-        Записывает информацию о найденном дубликате в базу данных.
-        duplicate_post_id может быть None, если пост еще не сохранен.
+        Записывает информацию о найденном дубликате в БД.
         """
-        duplicate_entry = Duplicate(
+        new_duplicate = Duplicate(
             original_post_id=original_post_id,
-            duplicate_post_id=duplicate_post_id, # Будет обновлен позже, если пост будет сохранен
-            reason=reason
+            duplicate_post_id=duplicate_post_id, # Может быть None на первом этапе
+            reason=reason,
+            created_at=datetime.datetime.now()
         )
-        db_session.add(duplicate_entry)
-        await db_session.commit()
-        logger.info(f"Запись о дубликате добавлена: оригинал={original_post_id}, дубликат={duplicate_post_id}, причина={reason}")
+        db_session.add(new_duplicate)
+        await db_session.commit() # Сохраняем сразу, чтобы получить ID для нового поста
+        logger.info(f"Запись о дубликате создана: original_post_id={original_post_id}, duplicate_post_id={duplicate_post_id}")
 
 # Создаем глобальный экземпляр дедупликатора
 deduplicator = Deduplicator()
 
 if __name__ == "__main__":
-    # Пример использования (требуется запущенная БД и init_db)
-    from db.database import get_session, init_db
-    import asyncio
-
     async def test_deduplicator():
-        await init_db() # Убедитесь, что таблицы созданы
+        logger.info("Запуск отладочного режима deduplicator.py...")
+        
+        # Пример использования с фиктивными данными
+        # В реальном приложении session будет получен через get_session()
+        class MockSession:
+            def __init__(self):
+                self.posts = []
+                self.duplicates = []
 
-        async for session in get_session():
-            # Создаем тестовые посты
-            city_id = 1 # Предполагаем, что город с ID 1 существует
-            await session.merge(Post(
-                original_text="Сегодня в городе открылся новый парк, это замечательное место для отдыха.",
-                status="published",
-                city_id=city_id,
-                donor_channel_id=1 # Предполагаем, что донор с ID 1 существует
-            ))
-            await session.merge(Post(
-                original_text="Вчера был сильный дождь, но сегодня погода улучшилась.",
-                status="published",
-                city_id=city_id,
-                donor_channel_id=1
-            ))
-            await session.commit()
+            async def execute(self, stmt):
+                # Имитация запроса к БД
+                if "FROM posts" in str(stmt):
+                    class MockResult:
+                        def all(self):
+                            return [
+                                type('obj', (object,), {'processed_text': "Это первая новость о погоде.", 'id': 1}),
+                                type('obj', (object,), {'processed_text': "Вчера был сильный дождь.", 'id': 2}),
+                                type('obj', (object,), {'processed_text': "Открытие нового парка в городе.", 'id': 3}),
+                            ]
+                    return MockResult()
+                return None
 
-            # Тестовые случаи
-            new_text1 = "Сегодня в городе открылся новый парк, это чудесное место для отдыха." # Смысловой дубликат
-            new_text2 = "Сегодня в городе открылся новый парк, это замечательное место для отдыха." # Текстовый дубликат
-            new_text3 = "Вчера был сильный ливень, но сегодня выглянуло солнце." # Смысловой дубликат
-            new_text4 = "Завтра ожидается повышение температуры до +30 градусов." # Не дубликат
+            def add(self, obj):
+                if isinstance(obj, Duplicate):
+                    self.duplicates.append(obj)
+                else:
+                    self.posts.append(obj)
 
-            is_dup1, reason1 = await deduplicator.check_for_duplicates(session, new_text1, city_id)
-            logger.info(f"'{new_text1[:30]}...' - Дубликат? {is_dup1}, Причина: {reason1}")
+            async def commit(self):
+                logger.info("MockSession: commit called.")
+                pass # В моке ничего не коммитим
 
-            is_dup2, reason2 = await deduplicator.check_for_duplicates(session, new_text2, city_id)
-            logger.info(f"'{new_text2[:30]}...' - Дубликат? {is_dup2}, Причина: {reason2}")
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
 
-            is_dup3, reason3 = await deduplicator.check_for_duplicates(session, new_text3, city_id)
-            logger.info(f"'{new_text3[:30]}...' - Дубликат? {is_dup3}, Причина: {reason3}")
+        mock_session = MockSession()
 
-            is_dup4, reason4 = await deduplicator.check_for_duplicates(session, new_text4, city_id)
-            logger.info(f"'{new_text4[:30]}...' - Дубликат? {is_dup4}, Причина: {reason4}")
+        # Тест: новый текст - дубликат
+        new_text_duplicate = "Сегодня произошло открытие нового парка в нашем городе."
+        is_dup, reason = await deduplicator.check_for_duplicates(mock_session, new_text_duplicate, 1)
+        logger.info(f"'{new_text_duplicate[:30]}...' - Дубликат? {is_dup}, Причина: {reason}")
+        
+        # Тест: новый текст - не дубликат
+        new_text_unique = "Ученые обнаружили новый вид бабочек в тропических лесах."
+        is_dup, reason = await deduplicator.check_for_duplicates(mock_session, new_text_unique, 1)
+        logger.info(f"'{new_text_unique[:30]}...' - Дубликат? {is_dup}, Причина: {reason}")
 
-    # Запускаем тест
+        logger.info("Дубликаты, записанные в MockSession:")
+        for dup in mock_session.duplicates:
+            logger.info(f"  Оригинал ID: {dup.original_post_id}, Дубликат ID: {dup.duplicate_post_id}, Причина: {dup.reason}")
+
     asyncio.run(test_deduplicator())

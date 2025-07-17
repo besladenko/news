@@ -2,14 +2,14 @@
 import asyncio
 from loguru import logger
 
-# from db.database import init_db, get_session # <-- Original line
-import db.database # <-- Changed: Import the module instead of specific functions
+from config import config # <-- Moved to the top
+
+import db.database
 from core.parser import telegram_parser, TelegramParser
 from core.scheduler import scheduler
 from core.gigachat import gigachat_api
 from bots.news_bot import dp as news_dp, bot as news_bot, process_new_donor_message, start_news_bot
 from bots.admin_bot import admin_dp, admin_bot, start_admin_bot
-from config import config
 from sqlalchemy.future import select
 from db.models import DonorChannel, City
 
@@ -31,7 +31,7 @@ async def main():
     logger.info("Запуск приложения Setinews...")
 
     # 1. Инициализация базы данных
-    await db.database.init_db() # <-- Changed: Access init_db as an attribute
+    await db.database.init_db()
 
     # 2. Инициализация и запуск Telethon парсера
     # Добавляем обработчик сообщений из парсера в наш процессор
