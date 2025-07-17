@@ -33,6 +33,7 @@ class DonorChannel(Base):
     telegram_id = Column(BigInteger, unique=True, nullable=False, comment="ID Telegram канала-донора")
     title = Column(String, nullable=False, comment="Название канала-донора")
     city_id = Column(Integer, ForeignKey('cities.id'), nullable=False, comment="ID городского канала, к которому привязан донор")
+    mask_pattern = Column(Text, nullable=True, comment="Регулярное выражение для фильтрации и очистки постов") # <-- НОВОЕ ПОЛЕ
     created_at = Column(DateTime, default=func.now(), comment="Время создания записи")
 
     # Связь с городом (многие-к-одному)
@@ -54,7 +55,7 @@ class Post(Base):
     source_link = Column(String, nullable=True, comment="Ссылка на оригинальный пост/источник")
     is_advertisement = Column(Boolean, default=False, comment="Признак рекламного характера")
     is_duplicate = Column(Boolean, default=False, comment="Признак дубликата")
-    status = Column(String, default="pending", comment="Статус поста: pending, approved, rejected, published")
+    status = Column(String, default="pending", comment="Статус поста: pending, approved, rejected, published, rejected_no_mask_match, rejected_empty_after_clean") # <-- Обновлен комментарий
     published_at = Column(DateTime, nullable=True, comment="Время публикации в городском канале")
     created_at = Column(DateTime, default=func.now(), comment="Время создания записи")
     donor_channel_id = Column(Integer, ForeignKey('donor_channels.id'), nullable=False, comment="ID канала-донора")
