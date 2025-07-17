@@ -33,8 +33,8 @@ class AdminStates(StatesGroup):
     waiting_for_post_id_to_rephrase = State()
     waiting_for_post_id_to_replace = State()
     waiting_for_new_text_for_replacement = State()
-    waiting_for_donor_to_set_mask = State() # <-- НОВОЕ СОСТОЯНИЕ
-    waiting_for_mask_pattern_input = State() # <-- НОВОЕ СОСТОЯНИЕ
+    waiting_for_donor_to_set_mask = State()
+    waiting_for_mask_pattern_input = State()
 
 
 # --- Middleware для проверки админ-прав ---
@@ -61,7 +61,7 @@ async def cmd_admin_start(message: types.Message):
         "/add_donor - Назначить донора каналу\n"
         "/toggle_mode - Включить/выключить авто-режим для канала\n"
         "/list_channels - Список всех городских каналов\n"
-        "/set_mask_pattern - Установить/изменить маску для донора\n" # <-- НОВАЯ КОМАНДА
+        "/set_mask_pattern - Установить/изменить маску для донора\n"
         "/logs - Просмотр логов публикаций/дубликатов\n"
         "/replace_news - Заменить опубликованную новость"
     )
@@ -261,7 +261,7 @@ async def list_channels_command(message: types.Message):
                 response_text += "  Доноры:\n"
                 for donor in donors:
                     mask_status = f"Маска: `{donor.mask_pattern}`" if donor.mask_pattern else "Маска: ❌ Не задана"
-                    response_text += f"    - {donor.title} (ID: `{donor.telegram_id}`) - {mask_status}\n" # <-- Обновлено
+                    response_text += f"    - {donor.title} (ID: `{donor.telegram_id}`) - {mask_status}\n"
             else:
                 response_text += "  Доноры: Нет\n"
             response_text += "\n"
@@ -344,7 +344,7 @@ async def logs_command(message: types.Message):
     if not await check_admin(message.from_user.id): return
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="История публикаций", callback_data="show_published_logs")],
-        [InlineKeyboardButton(text="Отклоненные посты", callback_data="show_rejected_logs")] # <-- Обновлено
+        [InlineKeyboardButton(text="Отклоненные посты", callback_data="show_rejected_logs")]
     ])
     await message.answer("Выберите тип логов:", reply_markup=keyboard)
 
@@ -374,17 +374,16 @@ async def show_published_logs(callback: types.CallbackQuery):
         await callback.message.edit_text(response_text, parse_mode="Markdown")
     await callback.answer()
 
-@admin_dp.callback_query(F.data == "show_rejected_logs") # <-- Обновлено
+@admin_dp.callback_query(F.data == "show_rejected_logs")
 async def show_rejected_logs(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     async for session in db.database.get_session():
-        # Выбираем все отклоненные посты, включая дубликаты и те, что не прошли маску
         stmt = select(Post).where(
             Post.status.in_([
                 "rejected_duplicate", 
-                "rejected_no_mask_defined", # <-- НОВЫЙ СТАТУС
+                "rejected_no_mask_defined",
                 "rejected_no_mask_match", 
                 "rejected_empty_after_clean",
                 "rejected_mask_error",
@@ -406,7 +405,7 @@ async def show_rejected_logs(callback: types.CallbackQuery):
             reason = "Неизвестно"
             if post.status == "rejected_duplicate":
                 reason = "Дубликат"
-            elif post.status == "rejected_no_mask_defined": # <-- НОВЫЙ СТАТУС
+            elif post.status == "rejected_no_mask_defined":
                 reason = "Маска не задана"
             elif post.status == "rejected_no_mask_match":
                 reason = "Не соответствует маске"
@@ -467,9 +466,8 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
 
         if post and post.status == "pending":
             await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
-            # GigaChat все еще используется здесь для переформулирования по запросу админа
             from core.gigachat import gigachat_api
-            rephrased_text = await gigachat_api.rephrase_text(post.original_text) # Используем original_text для переформулирования
+            rephrased_text = await gigachat_api.rephrase_text(post.original_text)
             if rephrased_text:
                 post.processed_text = rephrased_text
                 await session.commit()
@@ -523,7 +521,7 @@ async def replace_news_command(message: types.Message, state: FSMContext):
     await message.answer("Введите ID поста, который вы хотите заменить:")
     await state.set_state(AdminStates.waiting_for_post_id_to_replace)
 
-@admin_dp.message(AdminStates.waiting_for_id_to_replace)
+@admin_dp.message(AdminStates.waiting_for_post_id_to_replace) # <-- ИСПРАВЛЕНО: Была опечатка
 async def process_post_id_for_replacement(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
     try:
@@ -569,6 +567,9 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
             await session.commit()
             await message.answer(f"Текст поста ID {post_id_to_replace} успешно обновлен в базе данных.")
             logger.info(f"Админ {message.from_user.id} заменил текст поста {post_id_to_replace}.")
+            # TODO: Если нужно, отправить обновленный пост в Telegram канал
+            # Для этого потребуется сохранить telegram_message_id при первой публикации
+            # и использовать admin_bot.edit_message_text(chat_id=post.city.telegram_id, message_id=post.telegram_message_id, text=new_text)
         else:
             await message.answer("Пост не найден.")
     await state.clear()
@@ -577,14 +578,13 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
 # Запуск админ-бота
 async def start_admin_bot():
     logger.info("Запуск админского Telegram бота...")
-    if not admin_telethon_client.is_connected():
-        await admin_telethon_client.start()
-        logger.info("Telethon клиент для админ-бота запущен.")
-
+    # Пропускаем все накопившиеся обновления
     await admin_dp.start_polling(admin_bot)
     logger.info("Админский Telegram бот остановлен.")
 
 if __name__ == "__main__":
+    # Этот блок не будет запускаться напрямую, так как бот запускается через main.py
+    # Но для отладки можно временно запустить
     async def debug_main():
         await start_admin_bot()
     asyncio.run(debug_main())
