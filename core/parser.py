@@ -39,13 +39,13 @@ class TelegramParser:
             logger.info(f"Новое сообщение от {chat_id} (ID: {event.id}): {event.text[:50]}...")
             
             # Скачиваем медиафайл, если он есть
-            image_url = None
+            image_url = None # Это будет локальный путь к скачанному файлу
             if event.photo:
                 try:
                     # Telethon возвращает список размеров фото, берем самый большой
                     photo_path = os.path.join(config.MEDIA_DOWNLOAD_DIR, f"{event.id}_{event.date.strftime('%Y%m%d%H%M%S')}.jpg")
                     await event.download_media(file=photo_path)
-                    image_url = photo_path
+                    image_url = photo_path # Сохраняем локальный путь
                     logger.info(f"Медиафайл скачан: {image_url}")
                 except Exception as e:
                     logger.error(f"Ошибка при скачивании фото для сообщения {event.id}: {e}")
@@ -54,15 +54,28 @@ class TelegramParser:
                 try:
                     video_path = os.path.join(config.MEDIA_DOWNLOAD_DIR, f"{event.id}_{event.date.strftime('%Y%m%d%H%M%S')}.mp4")
                     await event.download_media(file=video_path)
-                    image_url = video_path # Сохраняем путь к видео как image_url для обработки в news_bot
+                    image_url = video_path # Сохраняем локальный путь к видео как image_url для обработки в news_bot
                     logger.info(f"Медиафайл скачан: {image_url}")
                 except Exception as e:
                     logger.error(f"Ошибка при скачивании видео для сообщения {event.id}: {e}")
                     image_url = None # Сбрасываем, если не удалось скачать
 
-            # Передаем весь объект event в news_bot.process_new_donor_message
-            # Функция process_new_donor_message теперь сама извлекает нужные данные из event
-            await process_new_donor_message(event)
+            # Определяем source_link (если есть)
+            source_link = None
+            if event.fwd_from and event.fwd_from.channel_post:
+                # Если это пересланное сообщение из канала, можно попытаться сформировать ссылку
+                # Это упрощенный вариант, может потребоваться доработка для разных типов пересылки
+                source_link = f"https://t.me/c/{abs(event.fwd_from.channel_id)}/{event.fwd_from.channel_post}"
+
+            # Передаем данные в news_bot.process_new_donor_message
+            # Теперь передаем явные аргументы, как ожидает функция в news_bot.py
+            await process_new_donor_message(
+                channel_id=chat_id,
+                message_id=event.id,
+                text=event.text,
+                media_paths=[image_url] if image_url else [], # Передаем список путей к медиафайлам
+                source_link=source_link
+            )
         else:
             # logger.debug(f"Сообщение от незарегистрированного канала {chat_id}. Пропускаем.")
             pass # Не логируем каждый пропущенный канал, чтобы не засорять логи
@@ -100,8 +113,8 @@ class TelegramParser:
 
 # Глобальный экземпляр парсера
 telegram_parser = TelegramParser(
-    api_id=config.TELETHON_API_ID, # <-- ИСПРАВЛЕНО
-    api_hash=config.TELETHON_API_HASH, # <-- ИСПРАВЛЕНО
+    api_id=config.TELETHON_API_ID,
+    api_hash=config.TELETHON_API_HASH,
     phone_number=config.PHONE_NUMBER
 )
 
