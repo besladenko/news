@@ -4,7 +4,8 @@ from loguru import logger
 
 from config import config # <-- Moved to the top
 
-import db.database
+# import db.database # <-- Удалена эта строка
+
 from core.parser import telegram_parser, TelegramParser
 from core.scheduler import scheduler
 from core.gigachat import gigachat_api
@@ -12,6 +13,9 @@ from bots.news_bot import dp as news_dp, bot as news_bot, process_new_donor_mess
 from bots.admin_bot import admin_dp, admin_bot, start_admin_bot
 from sqlalchemy.future import select
 from db.models import DonorChannel, City
+
+# Импортируем init_db и get_session здесь, после всех остальных импортов модулей
+from db.database import init_db, get_session # <-- Перенесено сюда
 
 async def run_parser_and_process_messages():
     """
@@ -31,7 +35,7 @@ async def main():
     logger.info("Запуск приложения Setinews...")
 
     # 1. Инициализация базы данных
-    await db.database.init_db()
+    await init_db() # <-- Вызываем напрямую
 
     # 2. Инициализация и запуск Telethon парсера
     # Добавляем обработчик сообщений из парсера в наш процессор
