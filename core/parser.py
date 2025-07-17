@@ -7,7 +7,6 @@ import os
 import datetime
 
 from config import config
-# from db.database import get_session # <-- Оригинальная строка: Удален прямой импорт
 import db.database # <-- ИСПРАВЛЕНО: Импорт модуля вместо прямой функции
 from db.models import DonorChannel, City, Post
 
