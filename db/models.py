@@ -1,6 +1,6 @@
 # db/models.py
 from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, ForeignKey, Text, Integer
-from sqlalchemy.orm import declarative_base, relationship # <-- Изменено: declarative_base импортируется из sqlalchemy.orm
+from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
 import datetime
 

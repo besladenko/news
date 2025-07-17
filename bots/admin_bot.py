@@ -33,6 +33,8 @@ class AdminStates(StatesGroup):
 
 
 # --- Middleware для проверки админ-прав ---
+# Это упрощенная проверка. В реальном приложении нужна более надежная система
+# Например, с использованием декораторов или более сложного middleware
 async def check_admin(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь админом."""
     async for session in get_session():
@@ -97,7 +99,7 @@ async def process_city_input(message: types.Message, state: FSMContext):
             new_city = City(telegram_id=telegram_id, title=city_name)
             session.add(new_city)
             await session.commit()
-            await message.answer(f"Городской канал '{city_name}' (ID: `{telegram_id}`) успешно добавлен!")
+            await message.answer(f"Городской канал '{city_name}' (ID: {telegram_id}) успешно добавлен!")
             logger.info(f"Админ {message.from_user.id} добавил город: {city_name} ({telegram_id})")
     except ValueError:
         await message.answer("Некорректный Telegram ID. Пожалуйста, введите число.")
@@ -132,25 +134,22 @@ async def process_select_city_donor(callback: types.CallbackQuery, state: FSMCon
         return
     city_id = int(callback.data.split('_')[-1])
     await state.update_data(target_city_id=city_id)
-    await callback.message.edit_text("Введите Telegram ID канала-донора (например, -1001234567890) и его название через запятую (например, -1001234567890, Новости Донора):")
-    await state.set_state(AdminStates.waiting_for_donor_input)
+    await callback.message.edit_text("Введите Telegram ID канала-донора (например, @news_channel_name или -1001234567890):")
+    await state.set_state(AdminStates.waiting_for_donor_id)
     await callback.answer()
 
-@admin_dp.message(AdminStates.waiting_for_donor_input)
-async def process_donor_input(message: types.Message, state: FSMContext):
+@admin_dp.message(AdminStates.waiting_for_donor_id)
+async def process_donor_id(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    input_parts = message.text.strip().split(',', 1)
+    donor_input = message.text.strip()
     user_data = await state.get_data()
     target_city_id = user_data['target_city_id']
 
-    if len(input_parts) != 2:
-        await message.answer("Неверный формат. Пожалуйста, введите ID и название через запятую.")
-        await state.clear()
-        return
-
+    # Попытка определить ID канала по имени или числовому ID
     try:
-        donor_telegram_id = int(input_parts[0].strip())
-        donor_title = input_parts[1].strip()
+        # В этом боте мы не используем Telethon для разрешения юзернеймов,
+        # поэтому ожидаем только числовой ID.
+        donor_telegram_id = int(donor_input)
 
         async for session in get_session():
             # Проверим, существует ли уже такой донор
@@ -160,22 +159,42 @@ async def process_donor_input(message: types.Message, state: FSMContext):
                 await state.clear()
                 return
 
-            new_donor = DonorChannel(telegram_id=donor_telegram_id, title=donor_title, city_id=target_city_id)
-            session.add(new_donor)
-            await session.commit()
+            # Для админ-бота, который не имеет Telethon клиента, мы не можем получить
+            # название канала по ID. Используем заглушку или просим пользователя ввести.
+            # Для простоты, просим пользователя ввести название.
+            await state.update_data(donor_telegram_id=donor_telegram_id)
+            await message.answer("Теперь введите название этого канала-донора:")
+            await state.set_state(AdminStates.waiting_for_donor_name)
+            return # Важно выйти, чтобы не продолжать обработку
 
-            city = await session.execute(select(City).where(City.id == target_city_id))
-            city_title = city.scalar_one().title
-
-            await message.answer(f"Донор '{donor_title}' (ID: `{donor_telegram_id}`) успешно привязан к каналу '{city_title}'!")
-            logger.info(f"Админ {message.from_user.id} привязал донора {donor_telegram_id} к городу {target_city_id}")
     except ValueError:
         await message.answer("Некорректный Telegram ID донора. Пожалуйста, введите число.")
     except Exception as e:
         await message.answer(f"Произошла ошибка при добавлении донора: {e}")
         logger.error(f"Ошибка при добавлении донора: {e}")
     finally:
-        await state.clear()
+        await state.clear() # Очищаем состояние в случае ошибки
+
+@admin_dp.message(AdminStates.waiting_for_donor_name)
+async def process_donor_name(message: types.Message, state: FSMContext):
+    if not await check_admin(message.from_user.id): return
+    donor_title = message.text.strip()
+    user_data = await state.get_data()
+    target_city_id = user_data['target_city_id']
+    donor_telegram_id = user_data['donor_telegram_id']
+
+    async for session in get_session():
+        new_donor = DonorChannel(telegram_id=donor_telegram_id, title=donor_title, city_id=target_city_id)
+        session.add(new_donor)
+        await session.commit()
+
+        city = await session.execute(select(City).where(City.id == target_city_id))
+        city_title = city.scalar_one().title
+
+        await message.answer(f"Донор '{donor_title}' (ID: `{donor_telegram_id}`) успешно привязан к каналу '{city_title}'!")
+        logger.info(f"Админ {message.from_user.id} привязал донора {donor_telegram_id} к городу {target_city_id}")
+    await state.clear()
+
 
 # --- Включить/выключить авто-режим ---
 @admin_dp.message(Command("toggle_mode"))
@@ -327,8 +346,6 @@ async def handle_publish_callback(callback: types.CallbackQuery):
         post = result.scalar_one_or_none()
 
         if post and post.status == "pending":
-            # Импортируем publish_post здесь, чтобы избежать циклического импорта на уровне модуля
-            from bots.news_bot import publish_post
             city = await session.get(City, post.city_id)
             if city:
                 # В publish_post теперь требуется media_paths
@@ -362,8 +379,6 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
 
         if post and post.status == "pending":
             await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
-            # Импортируем gigachat_api здесь, чтобы избежать циклического импорта на уровне модуля
-            from core.gigachat import gigachat_api
             rephrased_text = await gigachat_api.rephrase_text(post.original_text)
             if rephrased_text:
                 post.processed_text = rephrased_text
