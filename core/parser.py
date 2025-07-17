@@ -7,8 +7,8 @@ import os
 import datetime
 
 from config import config
-import db.database # <-- ИСПРАВЛЕНО: Импорт модуля вместо прямой функции
-from db.models import DonorChannel, City, Post
+# import db.database # <-- ИСПРАВЛЕНО: Удален импорт db.database, так как он здесь не нужен
+from db.models import DonorChannel, City, Post # db.models нужен для типизации, но не для сессий БД
 
 class TelegramParser:
     def __init__(self, api_id, api_hash):
