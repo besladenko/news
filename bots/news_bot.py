@@ -8,7 +8,7 @@ from loguru import logger
 
 from config import config
 import db.database
-from db.models import Post, City, DonorChannel
+from db.models import Post, City, DonorChannel, ChannelSetting
 from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
 from sqlalchemy.future import select
@@ -106,25 +106,20 @@ async def process_new_donor_message(
     """
     logger.info(f"Начало обработки нового сообщения от донора {channel_id}, ID: {message_id}")
 
-    # Use db.database.get_session instead of get_session directly
     async for session in db.database.get_session():
         # --- Начало костыля для обработки ID канала ---
-        # Telethon часто возвращает ID без префикса -100.
-        # Проверяем оба варианта: raw ID и ID с префиксом -100.
         possible_donor_ids = [channel_id]
-        if channel_id > 0: # Если ID положительный, добавляем вариант с -100
+        if channel_id > 0:
             possible_donor_ids.append(int(f"-100{channel_id}"))
-        elif str(channel_id).startswith('-100'): # Если уже с -100, добавляем raw ID
+        elif str(channel_id).startswith('-100'):
             try:
                 possible_donor_ids.append(int(str(channel_id)[4:]))
             except ValueError:
-                pass # Если не удалось преобразовать, игнорируем
+                pass
 
-        # Находим донорский канал по любому из возможных ID
         stmt_donor = select(DonorChannel).where(DonorChannel.telegram_id.in_(possible_donor_ids))
         result_donor = await session.execute(stmt_donor)
         donor_channel = result_donor.scalar_one_or_none()
-        # --- Конец костыля ---
 
         if not donor_channel:
             logger.warning(f"Сообщение от неизвестного донора (ID: {channel_id}). Пропускаем.")
@@ -138,14 +133,40 @@ async def process_new_donor_message(
             logger.error(f"Городской канал для донора {donor_channel.title} (ID: {donor_channel.city_id}) не найден. Пропускаем.")
             return
 
-        # 1. Проверка на дубликат
+        # 1. Проверка на рекламный характер (ПЕРВЫЙ ШАГ)
+        is_advertisement = await gigachat_api.check_advertisement(text)
+        if is_advertisement:
+            logger.info(f"Сообщение '{text[:50]}...' является рекламным. Отправляем на ручную модерацию.")
+            new_post = Post(
+                original_text=text,
+                processed_text=text, # processed_text = original_text for suspected ads
+                image_url=media_paths[0] if media_paths else None,
+                source_link=source_link,
+                is_advertisement=True, # Mark as advertisement
+                is_duplicate=False,
+                status="pending", # Always pending for ads
+                donor_channel_id=donor_channel.id,
+                city_id=city.id,
+                original_message_id=message_id
+            )
+            session.add(new_post)
+            await session.commit()
+            # Отправляем на модерацию
+            from bots.admin_bot import admin_bot # Импортируем здесь, чтобы избежать циклической зависимости
+            await send_post_to_admin_panel(new_post.id, city.telegram_id, session, media_paths)
+            return # Stop processing here for ads
+
+        # Если не рекламное сообщение, продолжаем обычную обработку:
+
+        # 2. Проверка на дубликат
         is_duplicate, reason = await deduplicator.check_for_duplicates(session, text, city.id)
 
         if is_duplicate:
             logger.info(f"Сообщение '{text[:50]}...' является дубликатом. Причина: {reason}. Не публикуем.")
             new_post = Post(
                 original_text=text,
-                image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
+                processed_text=text, # Для отклоненных дубликатов сохраняем оригинал
+                image_url=media_paths[0] if media_paths else None,
                 source_link=source_link,
                 is_duplicate=True,
                 status="rejected_duplicate",
@@ -157,49 +178,10 @@ async def process_new_donor_message(
             await session.commit()
             return
 
-        # 2. Проверка на рекламный характер
-        is_advertisement = await gigachat_api.check_advertisement(text)
-        if is_advertisement:
-            logger.info(f"Сообщение '{text[:50]}...' является рекламным. Отправляем на ручную модерацию.")
-            new_post = Post(
-                original_text=text,
-                processed_text=text, # Для рекламных постов processed_text равен original_text
-                image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
-                source_link=source_link,
-                is_advertisement=True,
-                is_duplicate=False,
-                status="pending",
-                donor_channel_id=donor_channel.id,
-                city_id=city.id,
-                original_message_id=message_id
-            )
-            session.add(new_post)
-            await session.commit()
-            await send_post_to_admin_panel(new_post.id, city.telegram_id, session, media_paths)
-            return
-
-        # 3. Проверка на ключевые слова для пропуска переформулирования
-        skip_rephrasing_keywords = ["бпла", "ракетная опасность"]
-        should_skip_rephrasing = False
-        for keyword in skip_rephrasing_keywords:
-            if keyword in text.lower():
-                should_skip_rephrasing = True
-                break
-        
-        if should_skip_rephrasing:
-            processed_text = text # Используем оригинальный текст
-            logger.info(f"Сообщение '{text[:50]}...' содержит ключевые слова ({' или '.join(skip_rephrasing_keywords)}). Переформулирование пропущено.")
-        else:
-            # 4. Переформулирование текста
-            processed_text = await gigachat_api.rephrase_text(text)
-            if not processed_text:
-                logger.warning(f"Не удалось переформулировать текст для '{text[:50]}...'. Используем оригинал.")
-                processed_text = text
-
-        # 5. Удаление рекламных ссылок и подписей (применяется всегда)
-        processed_text = await _remove_promotional_links(processed_text)
+        # 3. Удаление рекламных ссылок и подписей (применяется к не-рекламным постам)
+        processed_text = await _remove_promotional_links(text) # Используем original_text как вход
         if not processed_text.strip(): # Если после очистки текст стал пустым
-            logger.warning(f"Текст поста (ID: {message_id}) стал пустым после удаления рекламных ссылок. Пропускаем.")
+            logger.warning(f"Текст поста (ID: {message_id}) стал пустым после удаления рекламных ссылок/призывов. Пропускаем.")
             new_post = Post(
                 original_text=text,
                 image_url=media_paths[0] if media_paths else None,
@@ -215,16 +197,33 @@ async def process_new_donor_message(
             await session.commit()
             return
 
+        # 4. Проверка на ключевые слова для пропуска переформулирования
+        skip_rephrasing_keywords = ["бпла", "ракетная опасность"]
+        should_skip_rephrasing = False
+        for keyword in skip_rephrasing_keywords:
+            if keyword in processed_text.lower(): # Проверяем уже очищенный текст
+                should_skip_rephrasing = True
+                break
+        
+        if should_skip_rephrasing:
+            final_text = processed_text # Используем уже очищенный текст
+            logger.info(f"Сообщение '{final_text[:50]}...' содержит ключевые слова ({' или '.join(skip_rephrasing_keywords)}). Переформулирование пропущено.")
+        else:
+            # 5. Переформулирование текста с новым запросом
+            final_text = await gigachat_api.rephrase_text(processed_text) # Используем новый метод
+            if not final_text:
+                logger.warning(f"Не удалось переформулировать текст для '{processed_text[:50]}...'. Используем очищенный оригинал.")
+                final_text = processed_text
 
-        # 6. Сохранение поста в БД
+        # 6. Сохранение поста в БД (для не-рекламных постов)
         new_post = Post(
             original_text=text,
-            processed_text=processed_text,
-            image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
+            processed_text=final_text,
+            image_url=media_paths[0] if media_paths else None,
             source_link=source_link,
-            is_advertisement=False,
+            is_advertisement=False, # Явно False
             is_duplicate=False,
-            status="pending",
+            status="pending", # Все еще pending для ручной проверки или авто-публикации
             donor_channel_id=donor_channel.id,
             city_id=city.id,
             original_message_id=message_id
@@ -237,6 +236,7 @@ async def process_new_donor_message(
         if city.auto_mode:
             await publish_post(new_post.id, city.telegram_id, session, media_paths)
         else:
+            from bots.admin_bot import admin_bot # Импортируем здесь
             await send_post_to_admin_panel(new_post.id, city.telegram_id, session, media_paths)
 
 async def publish_post(post_id: int, target_telegram_channel_id: int, session: AsyncSession, media_paths: list[str]):
@@ -353,6 +353,7 @@ async def send_post_to_admin_panel(post_id: int, target_telegram_channel_id: int
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
+            InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"), # Добавлена кнопка редактирования
             InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
             InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
         ]
