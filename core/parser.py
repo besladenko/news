@@ -7,7 +7,8 @@ import os
 import datetime
 
 from config import config
-# import db.database # <-- ИСПРАВЛЕНО: Удален импорт db.database, так как он здесь не нужен
+# from db.database import get_session # <-- УДАЛЕНО
+# import db.database # <-- УДАЛЕНО
 from db.models import DonorChannel, City, Post # db.models нужен для типизации, но не для сессий БД
 
 class TelegramParser:

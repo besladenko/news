@@ -2,9 +2,8 @@
 import asyncio
 from loguru import logger
 
-from config import config # <-- Moved to the top
-
-# import db.database # <-- Эта строка удалена
+from config import config
+from db.database import init_db, get_session # <-- ИСПРАВЛЕНО: Прямой импорт init_db и get_session
 
 from core.parser import telegram_parser, TelegramParser
 from core.scheduler import scheduler
@@ -13,9 +12,6 @@ from bots.news_bot import dp as news_dp, bot as news_bot, process_new_donor_mess
 from bots.admin_bot import admin_dp, admin_bot, start_admin_bot
 from sqlalchemy.future import select
 from db.models import DonorChannel, City
-
-# Импортируем init_db и get_session здесь, после всех остальных импортов модулей
-from db.database import init_db, get_session # <-- Перенесено сюда
 
 async def run_parser_and_process_messages():
     """
@@ -44,10 +40,11 @@ async def main():
 
     # 3. Запуск планировщика
     # Добавляем задачу для периодического обновления токена GigaChat
-    scheduler.add_task(gigachat_api.get_token(), 15 * 60, "Обновление токена GigaChat") # Каждые 15 минут
+    # Передаем callable (функцию), а не уже выполненную корутину
+    scheduler.add_task(gigachat_api.get_token, 15 * 60, "Обновление токена GigaChat") # Каждые 15 минут
     # TODO: Добавить задачу для периодической проверки каналов на наличие новых постов
     # (если Telethon.events.NewMessage недостаточно для всех сценариев)
-    # scheduler.add_task(run_parser_and_process_messages(), 60, "Парсинг новых сообщений") # Каждую минуту
+    # scheduler.add_task(run_parser_and_process_messages, 60, "Парсинг новых сообщений") # Каждую минуту
 
     await scheduler.start()
 
