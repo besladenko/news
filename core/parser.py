@@ -62,7 +62,7 @@ class TelegramParser:
 
             # Передаем весь объект event в news_bot.process_new_donor_message
             # Функция process_new_donor_message теперь сама извлекает нужные данные из event
-            await process_new_donor_message(event) # <-- ИСПРАВЛЕНО: Передаем только event
+            await process_new_donor_message(event)
         else:
             # logger.debug(f"Сообщение от незарегистрированного канала {chat_id}. Пропускаем.")
             pass # Не логируем каждый пропущенный канал, чтобы не засорять логи
@@ -100,8 +100,8 @@ class TelegramParser:
 
 # Глобальный экземпляр парсера
 telegram_parser = TelegramParser(
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
+    api_id=config.TELETHON_API_ID, # <-- ИСПРАВЛЕНО
+    api_hash=config.TELETHON_API_HASH, # <-- ИСПРАВЛЕНО
     phone_number=config.PHONE_NUMBER
 )
 
