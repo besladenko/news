@@ -1,145 +1,155 @@
 # core/parser.py
 from telethon import TelegramClient, events
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage, MessageMediaUnsupported
-from config import config
+from telethon.tl.types import Channel, User, Chat, MessageMediaPhoto, MessageMediaDocument
 from loguru import logger
 import asyncio
 import os
+import datetime
+
+from config import config
+# from db.database import get_session # <-- Original line: Removed direct import
+import db.database # <-- Changed: Import the module instead
+from db.models import DonorChannel, City, Post
+# from bots.news_bot import process_new_donor_message # <-- This import is now handled by main.py's add_message_handler
 
 class TelegramParser:
-    """
-    Класс для парсинга сообщений из Telegram каналов-доноров с использованием Telethon.
-    """
-    def __init__(self, api_id: int, api_hash: str, session_name: str = 'telethon_session'):
-        self.client = TelegramClient(session_name, api_id, api_hash)
-        self.running = False
-        self.message_handlers = [] # Список функций-обработчиков для новых сообщений
-
-    async def start(self):
-        """Запускает клиент Telethon и авторизуется."""
-        logger.info("Запуск Telethon клиента...")
-        try:
-            await self.client.start()
-            self.running = True
-            logger.info("Telethon клиент запущен.")
-            # Добавляем обработчик для новых сообщений
-            # incoming=True: только сообщения, приходящие в наши диалоги/каналы
-            # forwards=False: игнорируем пересланные сообщения, т.к. нас интересует оригинал
-            self.client.add_event_handler(self._new_message_handler, events.NewMessage(incoming=True, forwards=False))
-        except Exception as e:
-            logger.error(f"Ошибка при запуске Telethon клиента: {e}")
-            self.running = False
-            # Если ошибка SessionPasswordNeededError, она будет поймана выше в main.py
-            # Здесь ловим общие ошибки, чтобы не упасть
-
-    async def stop(self):
-        """Останавливает клиент Telethon."""
-        if self.running:
-            logger.info("Остановка Telethon клиента...")
-            await self.client.disconnect()
-            self.running = False
-            logger.info("Telethon клиент остановлен.")
+    def __init__(self, api_id, api_hash):
+        self.client = TelegramClient('telegram_parser_session', api_id, api_hash)
+        self.message_handlers = []
+        self._is_running = False
 
     def add_message_handler(self, handler_func):
-        """Добавляет функцию-обработчик для новых сообщений."""
+        """
+        Добавляет функцию-обработчик для новых сообщений.
+        Эта функция будет вызываться для каждого нового сообщения.
+        """
         self.message_handlers.append(handler_func)
         logger.info(f"Добавлен обработчик сообщений: {handler_func.__name__}")
 
     async def _new_message_handler(self, event):
         """
-        Внутренний обработчик новых сообщений.
-        Передает сообщение всем зарегистрированным обработчикам.
-        Обрабатывает одиночные медиа и медиа-альбомы.
+        Обработчик новых сообщений Telethon.
+        Извлекает текст, медиафайлы и вызывает зарегистрированные обработчики.
         """
-        # Проверяем, является ли отправитель каналом (не личным сообщением)
-        if hasattr(event.peer_id, 'channel_id'):
-            channel_id = event.peer_id.channel_id
-            message_text = event.message.message
-            message_id = event.message.id
-            sender_chat = await event.get_chat()
-            sender_title = sender_chat.title if sender_chat else f"Канал {channel_id}"
+        logger.info(f"Новое сообщение от {event.peer_id.channel_id if event.is_channel else event.peer_id.user_id} (ID: {event.id}): {event.message.text[:50]}...")
 
-            media_paths = [] # Список для хранения путей ко всем скачанным медиафайлам
-            media_dir = "downloads"
-            os.makedirs(media_dir, exist_ok=True) # Создаем директорию, если ее нет
+        # Проверяем, что сообщение пришло из канала
+        if not event.is_channel:
+            logger.debug(f"Сообщение {event.id} не из канала. Пропускаем.")
+            return
 
-            if event.message.media:
-                # Проверяем, является ли это медиа-альбомом
-                if event.message.grouped_id:
-                    # Это часть медиа-альбома. Telethon обрабатывает альбомы как отдельные события
-                    # с одинаковым grouped_id. Мы должны собрать все части альбома.
-                    # Для простоты текущей реализации, мы будем скачивать каждое медиа по отдельности
-                    # при получении его события. deduplicator должен будет учесть, что это части одного поста.
-                    # В более сложной системе, нужно было бы ждать все части альбома, прежде чем обрабатывать.
-                    # Но для NewMessage события, каждое медиа в альбоме приходит как отдельное событие.
-                    # Поэтому просто обрабатываем его как одиночное медиа.
-                    pass # Пройдет в блок ниже, как одиночное медиа
+        # Получаем ID канала Telethon.
+        # Telethon возвращает ID канала без префикса -100.
+        # Мы будем использовать этот "сырой" ID для поиска донора в БД,
+        # а news_bot.py будет обрабатывать оба формата ID.
+        channel_id = event.peer_id.channel_id if event.is_channel else None
+        if not channel_id:
+            logger.warning(f"Не удалось определить ID канала для сообщения {event.id}. Пропускаем.")
+            return
 
-                # Обработка одиночного медиафайла
+        text = event.message.text
+        media_paths = []
+
+        # Обработка медиафайлов
+        if event.message.media:
+            try:
+                # Создаем директорию для медиа, если ее нет
+                media_dir = "media_downloads"
+                os.makedirs(media_dir, exist_ok=True)
+
+                # Скачиваем медиа
+                # Telethon автоматически определяет тип медиа (фото/видео)
+                # Если это альбом, event.message.media будет содержать MediaGroup
+                # Но events.NewMessage обрабатывает каждый элемент альбома как отдельное событие
+                # Для упрощения, мы будем скачивать только первое медиа, если это не альбом.
+                # Если это альбом, Telethon отправляет каждое фото/видео как отдельное сообщение,
+                # но с тем же album_id. Для корректной обработки альбомов,
+                # нужно собирать сообщения по album_id и обрабатывать их вместе.
+                # Пока что мы просто скачиваем каждое медиа, как оно приходит.
+                
+                # Получаем путь к файлу
+                file_name = f"{event.id}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
                 if isinstance(event.message.media, MessageMediaPhoto):
-                    file_extension = "jpg"
-                    path = os.path.join(media_dir, f"photo_{event.message.id}.{file_extension}")
-                    try:
-                        await self.client.download_media(event.message.media, file=path)
-                        media_paths.append(path)
-                        logger.info(f"Фото сохранено: {path}")
-                    except Exception as e:
-                        logger.warning(f"Не удалось загрузить фото для сообщения {message_id}: {e}")
+                    file_name += ".jpg"
                 elif isinstance(event.message.media, MessageMediaDocument):
-                    # Проверяем, является ли документ видео
-                    if event.message.media.document.mime_type and event.message.media.document.mime_type.startswith('video/'):
-                        file_extension = event.message.media.document.mime_type.split('/')[-1]
-                        path = os.path.join(media_dir, f"video_{event.message.id}.{file_extension}")
-                        try:
-                            await self.client.download_media(event.message.media, file=path)
-                            media_paths.append(path)
-                            logger.info(f"Видео сохранено: {path}")
-                        except Exception as e:
-                            logger.warning(f"Не удалось загрузить видео для сообщения {message_id}: {e}")
+                    # Пытаемся получить расширение из документа
+                    if event.message.media.document.mime_type:
+                        mime_type = event.message.media.document.mime_type
+                        if 'image/' in mime_type:
+                            file_name += "." + mime_type.split('/')[-1]
+                        elif 'video/' in mime_type:
+                            file_name += "." + mime_type.split('/')[-1]
+                        else:
+                            file_name += ".bin" # Запасной вариант
                     else:
-                        logger.info(f"Обнаружен документ (не фото/видео) в сообщении {message_id} из {sender_title}. Пропускаем.")
-                elif isinstance(event.message.media, MessageMediaWebPage):
-                    # Это предварительный просмотр ссылки, обычно не нужно скачивать как медиа
-                    logger.info(f"Обнаружен предпросмотр ссылки в сообщении {message_id} из {sender_title}. Пропускаем как медиа.")
-                elif isinstance(event.message.media, MessageMediaUnsupported):
-                    logger.warning(f"Обнаружен неподдерживаемый тип медиа в сообщении {message_id} из {sender_title}. Пропускаем.")
+                        file_name += ".bin"
+
+                download_path = os.path.join(media_dir, file_name)
+                
+                # Скачиваем файл
+                downloaded_file = await self.client.download_media(event.message, file=download_path)
+                if downloaded_file:
+                    media_paths.append(downloaded_file)
+                    logger.info(f"Медиафайл скачан: {downloaded_file}")
                 else:
-                    logger.info(f"Обнаружен неизвестный тип медиа {type(event.message.media)} в сообщении {message_id} из {sender_title}. Пропускаем.")
+                    logger.warning(f"Не удалось скачать медиа для сообщения {event.id}.")
 
-            logger.info(f"Новое сообщение от {sender_title} (ID: {channel_id}): {message_text[:50]}...")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке медиа для сообщения {event.id}: {e}")
 
-            for handler in self.message_handlers:
-                await handler(
-                    channel_id=channel_id,
-                    message_id=message_id,
-                    text=message_text,
-                    media_paths=media_paths, # Передаем список путей ко всем медиафайлам
-                    source_link=f"https://t.me/c/{channel_id}/{message_id}" # Ссылка на оригинальный пост
-                )
+        # Формируем ссылку на источник
+        source_link = f"https://t.me/c/{channel_id}/{event.message.id}"
+
+        # Вызываем все зарегистрированные обработчики
+        for handler in self.message_handlers:
+            await handler(
+                channel_id,
+                event.message.id,
+                text,
+                media_paths,
+                source_link
+            )
+
+    async def start(self):
+        """Запускает Telethon клиент и регистрирует обработчик сообщений."""
+        if self._is_running:
+            logger.warning("Парсер Telethon уже запущен.")
+            return
+
+        logger.info("Запуск парсера Telethon...")
+        try:
+            await self.client.start()
+            logger.info("Парсер Telethon успешно подключен.")
+            # Регистрируем обработчик для всех входящих новых сообщений
+            self.client.add_event_handler(self._new_message_handler, events.NewMessage(incoming=True, func=lambda e: e.is_channel or e.is_private))
+            self._is_running = True
+        except Exception as e:
+            logger.error(f"Ошибка при запуске парсера Telethon: {e}")
+            self._is_running = False
+
+    async def stop(self):
+        """Останавливает Telethon клиент."""
+        if self._is_running:
+            logger.info("Остановка парсера Telethon...")
+            await self.client.disconnect()
+            self._is_running = False
+            logger.info("Парсер Telethon остановлен.")
 
 # Создаем глобальный экземпляр парсера
-telegram_parser = TelegramParser(api_id=config.TELETHON_API_ID, api_hash=config.TELETHON_API_HASH)
+telegram_parser = TelegramParser(config.TELETHON_API_ID, config.TELETHON_API_HASH)
 
 if __name__ == "__main__":
-    # Пример использования парсера
-    async def my_message_processor(channel_id, message_id, text, media_paths, source_link):
-        logger.info(f"Обработчик получил сообщение: Канал ID={channel_id}, Сообщение ID={message_id}")
-        logger.info(f"Текст: {text[:100]}...")
-        if media_paths:
-            logger.info(f"Медиа: {media_paths}")
-        logger.info(f"Ссылка: {source_link}")
-
-    async def main():
-        telegram_parser.add_message_handler(my_message_processor)
+    async def debug_main():
+        # Этот блок предназначен только для отладки parser.py отдельно
+        # В основном приложении он запускается через main.py
+        logger.info("Запуск отладочного режима parser.py...")
         await telegram_parser.start()
-        logger.info("Парсер запущен. Ожидание сообщений (нажмите Ctrl+C для выхода)...")
         try:
-            while True:
-                await asyncio.sleep(1) # Небольшая задержка, чтобы не нагружать CPU
+            # Держим клиент запущенным, чтобы он мог получать сообщения
+            await asyncio.Event().wait()
         except KeyboardInterrupt:
-            logger.info("Остановка парсера по запросу пользователя.")
+            logger.info("Остановка отладочного режима parser.py.")
         finally:
             await telegram_parser.stop()
 
-    # Запускаем основной цикл
-    asyncio.run(main())
+    asyncio.run(debug_main())
