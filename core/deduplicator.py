@@ -9,7 +9,7 @@ from sqlalchemy import func
 import datetime
 
 from config import config
-from db.database import get_session # <-- Убедитесь, что это так
+import db.database # <-- ИСПРАВЛЕНО: Импорт модуля вместо прямой функции
 from db.models import Post, Duplicate
 
 class Deduplicator:

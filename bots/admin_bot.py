@@ -12,7 +12,7 @@ from telethon import TelegramClient
 from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError
 
 from config import config
-from db.database import get_session # <-- Убедитесь, что это так
+import db.database # <-- ИСПРАВЛЕНО: Импорт модуля вместо прямой функции
 from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
 
 # from bots.news_bot import publish_post # <-- This import is now handled locally in handle_publish_callback

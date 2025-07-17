@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 from loguru import logger
 
 from config import config
-from db.database import get_session # <-- Убедитесь, что это так
+import db.database # <-- ИСПРАВЛЕНО: Импорт модуля вместо прямой функции
 from db.models import Post, City, DonorChannel, ChannelSetting
 
 from core.gigachat import gigachat_api
