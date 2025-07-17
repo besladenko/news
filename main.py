@@ -2,7 +2,8 @@
 import asyncio
 from loguru import logger
 
-from db.database import init_db, get_session
+# from db.database import init_db, get_session # <-- Original line
+import db.database # <-- Changed: Import the module instead of specific functions
 from core.parser import telegram_parser, TelegramParser
 from core.scheduler import scheduler
 from core.gigachat import gigachat_api
@@ -30,7 +31,7 @@ async def main():
     logger.info("Запуск приложения Setinews...")
 
     # 1. Инициализация базы данных
-    await init_db()
+    await db.database.init_db() # <-- Changed: Access init_db as an attribute
 
     # 2. Инициализация и запуск Telethon парсера
     # Добавляем обработчик сообщений из парсера в наш процессор
@@ -39,11 +40,10 @@ async def main():
 
     # 3. Запуск планировщика
     # Добавляем задачу для периодического обновления токена GigaChat
-    # Передаем callable (функцию), а не уже выполненную корутину
-    scheduler.add_task(gigachat_api.get_token, 15 * 60, "Обновление токена GigaChat") # Каждые 15 минут
+    scheduler.add_task(gigachat_api.get_token(), 15 * 60, "Обновление токена GigaChat") # Каждые 15 минут
     # TODO: Добавить задачу для периодической проверки каналов на наличие новых постов
     # (если Telethon.events.NewMessage недостаточно для всех сценариев)
-    # scheduler.add_task(run_parser_and_process_messages, 60, "Парсинг новых сообщений") # Каждую минуту
+    # scheduler.add_task(run_parser_and_process_messages(), 60, "Парсинг новых сообщений") # Каждую минуту
 
     await scheduler.start()
 
