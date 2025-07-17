@@ -397,6 +397,8 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
 
         if post and post.status == "pending":
             await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
+            # Импортируем gigachat_api здесь, чтобы избежать циклического импорта на уровне модуля
+            from core.gigachat import gigachat_api
             rephrased_text = await gigachat_api.rephrase_text(post.original_text)
             if rephrased_text:
                 post.processed_text = rephrased_text
