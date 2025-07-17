@@ -15,7 +15,6 @@ from config import config
 from db.database import get_session
 from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
 from core.gigachat import gigachat_api
-# from bots.news_bot import publish_post # <-- Удалено: Избегаем циклического импорта здесь
 import asyncio
 
 # Инициализация админ-бота
@@ -29,8 +28,8 @@ admin_telethon_client = TelegramClient('admin_telethon_session', config.TELETHON
 # Состояния для FSM админ-бота
 class AdminStates(StatesGroup):
     """Состояния для диалогов админ-бота."""
-    waiting_for_city_input = State() # Изменено для приема ссылки/юзернейма
-    waiting_for_donor_input = State() # Изменено для приема ссылки/юзернейма
+    waiting_for_city_input = State()
+    waiting_for_donor_input = State()
     waiting_for_city_to_assign_donor = State()
     waiting_for_city_to_toggle_mode = State()
     waiting_for_post_id_to_rephrase = State()
@@ -87,13 +86,17 @@ async def process_city_input(message: types.Message, state: FSMContext):
             logger.info("Telethon клиент для админ-бота запущен.")
 
         entity = await admin_telethon_client.get_entity(channel_input)
-        telegram_id = entity.id
-        channel_title = entity.title if entity.title else entity.username # Используем username, если нет title
-
-        if not (entity.broadcast or entity.megagroup): # Проверяем, что это канал или супергруппа
+        
+        # Проверяем, что это канал или супергруппа
+        if not (hasattr(entity, 'broadcast') and entity.broadcast) and \
+           not (hasattr(entity, 'megagroup') and entity.megagroup):
             await message.answer("Это не канал или супергруппа Telegram. Пожалуйста, введите юзернейм или ссылку на канал/супергруппу.")
             await state.clear()
             return
+
+        # Если это канал или супергруппа, добавляем префикс -100 к ID
+        telegram_id = int(f"-100{entity.id}")
+        channel_title = entity.title if entity.title else entity.username # Используем username, если нет title
 
         async for session in get_session():
             existing_city = await session.execute(select(City).where(City.telegram_id == telegram_id))
@@ -159,13 +162,17 @@ async def process_donor_input(message: types.Message, state: FSMContext):
             logger.info("Telethon клиент для админ-бота запущен.")
 
         entity = await admin_telethon_client.get_entity(donor_input)
-        donor_telegram_id = entity.id
-        donor_title = entity.title if entity.title else entity.username # Используем username, если нет title
-
-        if not (entity.broadcast or entity.megagroup): # Проверяем, что это канал или супергруппа
+        
+        # Проверяем, что это канал или супергруппа
+        if not (hasattr(entity, 'broadcast') and entity.broadcast) and \
+           not (hasattr(entity, 'megagroup') and entity.megagroup):
             await message.answer("Это не канал или супергруппа Telegram. Пожалуйста, введите юзернейм или ссылку на канал/супергруппу.")
             await state.clear()
             return
+
+        # Если это канал или супергруппа, добавляем префикс -100 к ID
+        donor_telegram_id = int(f"-100{entity.id}")
+        donor_title = entity.title if entity.title else entity.username # Используем username, если нет title
 
         async for session in get_session():
             # Проверим, существует ли уже такой донор
@@ -347,7 +354,16 @@ async def handle_publish_callback(callback: types.CallbackQuery):
             from bots.news_bot import publish_post
             city = await session.get(City, post.city_id)
             if city:
-                await publish_post(post.id, city.telegram_id, session)
+                # В publish_post теперь требуется media_paths
+                # Если пост был рекламным, media_paths могли быть пустыми.
+                # Если пост был обычным, media_paths были переданы из parser.py
+                # Для корректной обработки, нужно передать media_paths.
+                # Пока что post.image_url хранит только первый путь.
+                # Для полной поддержки альбомов здесь нужно будет доработать.
+                # Временно, если post.image_url есть, передаем его в списке.
+                # Если нет, то пустой список.
+                current_media_paths = [post.image_url] if post.image_url else []
+                await publish_post(post.id, city.telegram_id, session, current_media_paths)
                 await callback.message.edit_text(f"Пост ID {post.id} опубликован в канал '{city.title}'.")
                 logger.info(f"Админ {callback.from_user.id} опубликовал пост {post.id}.")
             else:
@@ -464,21 +480,11 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
         post = result.scalar_one_or_none()
 
         if post:
-            # В реальном Telegram API нет прямого метода "заменить сообщение" в канале.
-            # Обычно это делается так:
-            # 1. Удаляется старое сообщение (если есть его message_id в Telegram)
-            # 2. Отправляется новое сообщение
-            # Для простоты, мы просто обновим processed_text в БД.
-            # Если нужно реальное обновление в Telegram, потребуется хранить telegram_message_id в Post
-            # и использовать bot.edit_message_text или bot.delete_message + bot.send_message
             post.processed_text = new_text
             post.published_at = func.now() # Обновляем время публикации
             await session.commit()
             await message.answer(f"Текст поста ID {post_id_to_replace} успешно обновлен в базе данных.")
             logger.info(f"Админ {message.from_user.id} заменил текст поста {post_id_to_replace}.")
-            # TODO: Если нужно, отправить обновленный пост в Telegram канал
-            # Для этого потребуется сохранить telegram_message_id при первой публикации
-            # и использовать admin_bot.edit_message_text(chat_id=post.city.telegram_id, message_id=post.telegram_message_id, text=new_text)
         else:
             await message.answer("Пост не найден.")
     await state.clear()
