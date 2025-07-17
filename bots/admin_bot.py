@@ -374,17 +374,26 @@ async def process_delete_city(callback: types.CallbackQuery, state: FSMContext):
             
             # Собираем ID доноров для удаления связанных постов
             donor_ids_to_delete = [donor.id for donor in donors_of_city]
+            logger.info(f"DEBUG: Donor IDs to delete for city {city_id}: {donor_ids_to_delete}")
 
+            # 1. Удаляем все посты, связанные с этими донорами ИЛИ напрямую связанные с городом
+            # Это гарантирует, что все посты, которые должны быть удалены вместе с городом, будут удалены.
             if donor_ids_to_delete:
-                # 1. Удаляем все посты, связанные с этими донорами
-                delete_posts_stmt = delete(Post).where(Post.donor_channel_id.in_(donor_ids_to_delete))
-                await session.execute(delete_posts_stmt)
-                logger.info(f"Удалены посты, связанные с донорами города {city_title} (ID: {city_id}).")
+                delete_posts_stmt = delete(Post).where(
+                    (Post.donor_channel_id.in_(donor_ids_to_delete)) | (Post.city_id == city_id)
+                )
+            else:
+                # Если доноров нет, удаляем посты только по city_id
+                delete_posts_stmt = delete(Post).where(Post.city_id == city_id)
+
+            deleted_posts_result = await session.execute(delete_posts_stmt)
+            logger.info(f"Удалено {deleted_posts_result.rowcount} постов, связанных с донорами или напрямую с городом {city_title} (ID: {city_id}).")
+
 
             # 2. Удаляем все донорские каналы, привязанные к этому городу
             delete_donors_stmt = delete(DonorChannel).where(DonorChannel.city_id == city_id)
-            await session.execute(delete_donors_stmt)
-            logger.info(f"Удалены доноры для города {city_title} (ID: {city_id}).")
+            deleted_donors_result = await session.execute(delete_donors_stmt)
+            logger.info(f"Удалено {deleted_donors_result.rowcount} доноров для города {city_title} (ID: {city_id}).")
 
             # 3. Удаляем сам городской канал
             await session.delete(city_to_delete)
