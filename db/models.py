@@ -1,7 +1,6 @@
 # db/models.py
 from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, ForeignKey, Text, Integer
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship # <-- Изменено: declarative_base импортируется из sqlalchemy.orm
 from sqlalchemy.sql import func
 import datetime
 
@@ -76,7 +75,7 @@ class Duplicate(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     original_post_id = Column(Integer, ForeignKey('posts.id'), nullable=False, comment="ID оригинального поста")
-    duplicate_post_id = Column(Integer, ForeignKey('posts.id'), nullable=False, comment="ID дублирующего поста")
+    duplicate_post_id = Column(Integer, ForeignKey('posts.id'), nullable=True, comment="ID дублирующего поста")
     reason = Column(String, nullable=True, comment="Причина дублирования (текст/смысл)")
     created_at = Column(DateTime, default=func.now(), comment="Время обнаружения дубликата")
 
@@ -115,4 +114,3 @@ class ChannelSetting(Base):
 
     def __repr__(self):
         return f"<ChannelSetting(id={self.id}, city_id={self.city_id})>"
-
