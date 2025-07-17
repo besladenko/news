@@ -39,11 +39,10 @@ class Config:
             "BOT_TOKEN", "ADMIN_BOT_TOKEN",
             "GIGACHAT_CLIENT_ID", "GIGACHAT_CLIENT_SECRET", "GIGACHAT_AUTH_KEY", "RQUUID",
             "POSTGRES_URL",
-            "API_ID", "API_HASH",
+            "TELETHON_API_ID", "TELETHON_API_HASH", # ИСПРАВЛЕНО: Изменены на фактические имена атрибутов
             "ADMIN_CHAT_ID"
         ]
         for var in required_vars:
-            # ИСПРАВЛЕНО: Обращаемся к атрибутам класса через Config, а не self
             if not getattr(Config, var):
                 logger.error(f"Переменная окружения {var} не установлена. Проверьте ваш .env файл.")
                 raise ValueError(f"Отсутствует переменная окружения: {var}")
