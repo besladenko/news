@@ -9,9 +9,8 @@ from sqlalchemy import func
 import datetime
 
 from config import config
-# from db.database import get_session # <-- Original line: Removed direct import
-import db.database # <-- Changed: Import the module instead
-from db.models import Post, Duplicate # Импортируем Post и Duplicate
+from db.database import get_session # <-- Убедитесь, что это так
+from db.models import Post, Duplicate
 
 class Deduplicator:
     def __init__(self, similarity_threshold: float = 0.8):

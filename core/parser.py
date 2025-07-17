@@ -7,10 +7,9 @@ import os
 import datetime
 
 from config import config
-# from db.database import get_session # <-- Original line: Removed direct import
-import db.database # <-- Changed: Import the module instead
+from db.database import get_session # <-- Убедитесь, что это так
 from db.models import DonorChannel, City, Post
-# from bots.news_bot import process_new_donor_message # <-- This import is now handled by main.py's add_message_handler
+
 
 class TelegramParser:
     def __init__(self, api_id, api_hash):

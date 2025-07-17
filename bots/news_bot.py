@@ -7,9 +7,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 from loguru import logger
 
 from config import config
-# from db.database import get_session # <-- Original line: Removed direct import
-import db.database # <-- Changed: Import the module instead
+from db.database import get_session # <-- Убедитесь, что это так
 from db.models import Post, City, DonorChannel, ChannelSetting
+
 from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
 from sqlalchemy.future import select
