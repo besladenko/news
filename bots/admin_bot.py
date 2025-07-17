@@ -109,6 +109,16 @@ async def resolve_channel_id(channel_identifier: str) -> tuple[int | None, str |
         return None, None
 
 
+# --- Middleware для проверки админ-прав ---
+async def check_admin(telegram_id: int) -> bool:
+    """Проверяет, является ли пользователь админом."""
+    async for session in get_session():
+        stmt = select(Admin).where(Admin.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        admin = result.scalar_one_or_none()
+        return admin is not None
+
+
 @admin_dp.message(CommandStart())
 async def cmd_admin_start(message: types.Message):
     """Обработчик команды /start для админ-бота."""
@@ -814,6 +824,6 @@ if __name__ == "__main__":
             async def stop(self): await self.client.disconnect()
 
         mock_parser = MockTelegramParser()
-        await mock_parser.start() # Убедимся, что клиент подключен для resolve_channel_i
+        await mock_parser.start() # Убедимся, что клиент подключен для resolve_channel_id
         await start_admin_bot(mock_parser) # Передаем фиктивный парсер
     asyncio.run(debug_main())
