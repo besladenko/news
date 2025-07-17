@@ -5,12 +5,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from loguru import logger
-from sqlalchemy.future import select
-from sqlalchemy import func, delete
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select # select остается из future
+from sqlalchemy import func, delete # <-- Исправлено: delete импортируется из sqlalchemy
+from sqlalchemy.ext.asyncio import AsyncSession # Импорт AsyncSession для типизации
 
 from config import config
-from db.database import get_session # <-- ИСПРАВЛЕНО: Прямой импорт get_session
+from db.database import get_session
 from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
 from core.gigachat import gigachat_api
 from bots.news_bot import publish_post # Импортируем функцию публикации из основного бота
@@ -23,8 +23,10 @@ admin_dp = Dispatcher()
 # Состояния для FSM админ-бота
 class AdminStates(StatesGroup):
     """Состояния для диалогов админ-бота."""
-    waiting_for_city_input = State() # Изменено для приема юзернейма/ссылки
-    waiting_for_donor_input = State() # Изменено для приема юзернейма/ссылки
+    waiting_for_city_name = State()
+    waiting_for_city_id = State()
+    waiting_for_donor_name = State()
+    waiting_for_donor_id = State()
     waiting_for_city_to_assign_donor = State()
     waiting_for_city_to_toggle_mode = State()
     waiting_for_post_id_to_rephrase = State()
@@ -67,48 +69,44 @@ async def cmd_admin_start(message: types.Message):
 @admin_dp.message(Command("add_city"))
 async def add_city_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    await message.answer("Введите Telegram ID нового городского канала (например, -1001234567890) и его название через запятую (например, -1001234567890, Мой Город):")
-    await state.set_state(AdminStates.waiting_for_city_input)
+    await message.answer("Введите Telegram ID нового городского канала (например, -1001234567890):")
+    await state.set_state(AdminStates.waiting_for_city_id)
 
-@admin_dp.message(AdminStates.waiting_for_city_input)
-async def process_city_input(message: types.Message, state: FSMContext):
+@admin_dp.message(AdminStates.waiting_for_city_id)
+async def process_city_id(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    input_parts = message.text.strip().split(',', 1)
-
-    if len(input_parts) != 2:
-        await message.answer("Неверный формат. Пожалуйста, введите ID и название через запятую.")
-        await state.clear()
-        return
-
     try:
-        telegram_id = int(input_parts[0].strip())
-        city_name = input_parts[1].strip()
-
+        telegram_id = int(message.text.strip())
         if not str(telegram_id).startswith('-100'):
             await message.answer("Telegram ID канала должен начинаться с -100. Попробуйте еще раз.")
+            return
+
+        await state.update_data(telegram_id=telegram_id)
+        await message.answer("Теперь введите название этого канала:")
+        await state.set_state(AdminStates.waiting_for_city_name)
+    except ValueError:
+        await message.answer("Некорректный Telegram ID. Пожалуйста, введите число.")
+
+@admin_dp.message(AdminStates.waiting_for_city_name)
+async def process_city_name(message: types.Message, state: FSMContext):
+    if not await check_admin(message.from_user.id): return
+    city_name = message.text.strip()
+    user_data = await state.get_data()
+    telegram_id = user_data['telegram_id']
+
+    async for session in get_session():
+        existing_city = await session.execute(select(City).where(City.telegram_id == telegram_id))
+        if existing_city.scalar_one_or_none():
+            await message.answer("Канал с таким Telegram ID уже существует.")
             await state.clear()
             return
 
-        async for session in get_session():
-            existing_city = await session.execute(select(City).where(City.telegram_id == telegram_id))
-            if existing_city.scalar_one_or_none():
-                await message.answer("Канал с таким Telegram ID уже существует.")
-                await state.clear()
-                return
-
-            new_city = City(telegram_id=telegram_id, title=city_name)
-            session.add(new_city)
-            await session.commit()
-            await message.answer(f"Городской канал '{city_name}' (ID: {telegram_id}) успешно добавлен!")
-            logger.info(f"Админ {message.from_user.id} добавил город: {city_name} ({telegram_id})")
-    except ValueError:
-        await message.answer("Некорректный Telegram ID. Пожалуйста, введите число.")
-    except Exception as e:
-        logger.error(f"Непредвиденная ошибка при добавлении городского канала: {e}")
-        await message.answer(f"Произошла непредвиденная ошибка: {e}")
-    finally:
-        await state.clear()
-
+        new_city = City(telegram_id=telegram_id, title=city_name)
+        session.add(new_city)
+        await session.commit()
+        await message.answer(f"Городской канал '{city_name}' (ID: {telegram_id}) успешно добавлен!")
+        logger.info(f"Админ {message.from_user.id} добавил город: {city_name} ({telegram_id})")
+    await state.clear()
 
 # --- Назначить список доноров ---
 @admin_dp.message(Command("add_donor"))
@@ -135,24 +133,25 @@ async def process_select_city_donor(callback: types.CallbackQuery, state: FSMCon
     city_id = int(callback.data.split('_')[-1])
     await state.update_data(target_city_id=city_id)
     await callback.message.edit_text("Введите Telegram ID канала-донора (например, @news_channel_name или -1001234567890):")
-    await state.set_state(AdminStates.waiting_for_donor_input) # ИСПРАВЛЕНО: Используем waiting_for_donor_input
+    await state.set_state(AdminStates.waiting_for_donor_id)
     await callback.answer()
 
-@admin_dp.message(AdminStates.waiting_for_donor_input) # ИСПРАВЛЕНО: Используем waiting_for_donor_input
-async def process_donor_input(message: types.Message, state: FSMContext):
+@admin_dp.message(AdminStates.waiting_for_donor_id)
+async def process_donor_id(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    input_parts = message.text.strip().split(',', 1)
+    donor_input = message.text.strip()
     user_data = await state.get_data()
     target_city_id = user_data['target_city_id']
 
-    if len(input_parts) != 2:
-        await message.answer("Неверный формат. Пожалуйста, введите ID и название через запятую.")
-        await state.clear()
-        return
-
+    # Попытка определить ID канала по имени или числовому ID
     try:
-        donor_telegram_id = int(input_parts[0].strip())
-        donor_title = input_parts[1].strip()
+        if donor_input.startswith('@'):
+            # В реальном приложении здесь нужна логика Telethon для получения ID по username
+            # Для простоты, пока будем считать, что пользователь вводит числовой ID
+            await message.answer("Для доноров, пожалуйста, введите числовой Telegram ID (начинается с -100 или просто числовой ID публичного канала).")
+            return
+        else:
+            donor_telegram_id = int(donor_input)
 
         async for session in get_session():
             # Проверим, существует ли уже такой донор
@@ -161,6 +160,9 @@ async def process_donor_input(message: types.Message, state: FSMContext):
                 await message.answer("Этот донор уже добавлен. Если вы хотите привязать его к другому городу, удалите его сначала.")
                 await state.clear()
                 return
+
+            # В реальном приложении здесь можно получить название канала через Telethon
+            donor_title = f"Канал ID {donor_telegram_id}" # Заглушка
 
             new_donor = DonorChannel(telegram_id=donor_telegram_id, title=donor_title, city_id=target_city_id)
             session.add(new_donor)
@@ -171,6 +173,7 @@ async def process_donor_input(message: types.Message, state: FSMContext):
 
             await message.answer(f"Донор '{donor_title}' (ID: {donor_telegram_id}) успешно привязан к каналу '{city_title}'!")
             logger.info(f"Админ {message.from_user.id} привязал донора {donor_telegram_id} к городу {target_city_id}")
+        await state.clear()
     except ValueError:
         await message.answer("Некорректный Telegram ID донора. Пожалуйста, введите число.")
     except Exception as e:
@@ -331,7 +334,9 @@ async def handle_publish_callback(callback: types.CallbackQuery):
         if post and post.status == "pending":
             city = await session.get(City, post.city_id)
             if city:
-                await publish_post(post.id, city.telegram_id, session)
+                # ИСПРАВЛЕНО: Передаем media_paths в publish_post
+                current_media_paths = [post.image_url] if post.image_url else []
+                await publish_post(post.id, city.telegram_id, session, current_media_paths)
                 await callback.message.edit_text(f"Пост ID {post.id} опубликован в канал '{city.title}'.")
                 logger.info(f"Админ {callback.from_user.id} опубликовал пост {post.id}.")
             else:
