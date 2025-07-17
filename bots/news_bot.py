@@ -7,8 +7,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 from loguru import logger
 
 from config import config
-# from db.database import get_session # <-- Original line: Removed direct import
-import db.database # <-- Changed: Import the module instead
+import db.database
 from db.models import Post, City, DonorChannel, ChannelSetting
 from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
@@ -22,6 +21,15 @@ import os
 # Инициализация бота
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
+
+# Глобальная переменная для хранения экземпляра TelethonParser
+telegram_parser_instance = None
+
+async def set_telegram_parser_instance_for_news_bot(parser_instance):
+    """Устанавливает экземпляр TelethonParser для использования в news_bot."""
+    global telegram_parser_instance
+    telegram_parser_instance = parser_instance
+    logger.info("Экземпляр TelethonParser установлен в news_bot.")
 
 # Состояния для FSM (Finite State Machine)
 class NewsBotStates(StatesGroup):
