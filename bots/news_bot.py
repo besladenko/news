@@ -8,7 +8,7 @@ from loguru import logger
 
 from config import config
 import db.database
-from db.models import Post, City, DonorChannel, ChannelSetting
+from db.models import Post, City, DonorChannel
 from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
 from sqlalchemy.future import select
