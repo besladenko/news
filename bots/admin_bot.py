@@ -18,6 +18,7 @@ from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
 from core.gigachat import gigachat_api
 from bots.news_bot import publish_post # Импортируем функцию публикации из основного бота
 import asyncio
+import re # Для обработки списка ссылок
 
 # Инициализация админ-бота
 admin_bot = Bot(token=config.ADMIN_BOT_TOKEN)
@@ -43,6 +44,9 @@ class AdminStates(StatesGroup):
     waiting_for_city_to_send_test_message = State()
     waiting_for_test_message_text = State()
     waiting_for_edited_text = State() # Для редактирования поста
+    waiting_for_city_to_delete = State() # Для удаления города
+    waiting_for_city_for_bulk_donors = State() # Для массового добавления доноров
+    waiting_for_bulk_donor_list = State() # Для ввода списка доноров
 
 async def set_telegram_parser_instance(parser_instance):
     """Устанавливает экземпляр TelethonParser для использования в admin_bot."""
@@ -66,6 +70,7 @@ async def resolve_channel_id(channel_identifier: str) -> tuple[int | None, str |
         if channel_identifier.lstrip('-').isdigit():
             num_id = int(channel_identifier)
             # Если ID положительный (для публичных каналов Telethon), добавляем -100
+            # Telethon для публичных каналов возвращает положительный ID, который нужно преобразовать в -100xxxx
             if num_id > 0 and not str(num_id).startswith('100'): # Избегаем двойного -100
                 return int(f"-100{num_id}"), None # Название пока неизвестно
             return num_id, None # Название пока неизвестно
@@ -117,11 +122,13 @@ async def cmd_admin_start(message: types.Message):
         "Используйте команды для управления:\n"
         "/add_city - Добавить новый городской канал\n"
         "/add_donor - Назначить донора каналу\n"
+        "/add_bulk_donors - Массово добавить доноров к каналу\n" # НОВОЕ
+        "/delete_city - Удалить городской канал и его доноров\n" # НОВОЕ
         "/toggle_mode - Включить/выключить авто-режим для канала\n"
         "/list_channels - Список всех городских каналов\n"
         "/logs - Просмотр логов публикаций/дубликатов\n"
         "/replace_news - Заменить опубликованную новость\n"
-        "/send_test_message - Отправить тестовое сообщение в канал" # НОВОЕ
+        "/send_test_message - Отправить тестовое сообщение в канал"
     )
     logger.info(f"Админ {message.from_user.id} запустил админ-бота.")
 
@@ -244,6 +251,127 @@ async def process_donor_input(message: types.Message, state: FSMContext):
         await message.answer(f"Донор '{donor_title}' (ID: `{donor_telegram_id}`) успешно привязан к каналу '{city_title}'!")
         logger.info(f"Админ {message.from_user.id} привязал донора {donor_telegram_id} к городу {target_city_id}")
     await state.clear()
+
+# --- Массовое добавление доноров ---
+@admin_dp.message(Command("add_bulk_donors"))
+async def add_bulk_donors_command(message: types.Message, state: FSMContext):
+    if not await check_admin(message.from_user.id): return
+    async for session in get_session():
+        cities = await session.execute(select(City))
+        cities = cities.scalars().all()
+        if not cities:
+            await message.answer("Сначала добавьте городские каналы (/add_city).")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=city.title, callback_data=f"select_city_bulk_donor_{city.id}")] for city in cities
+        ])
+        await message.answer("Выберите городской канал, к которому хотите массово привязать доноров:", reply_markup=keyboard)
+        await state.set_state(AdminStates.waiting_for_city_for_bulk_donors)
+
+@admin_dp.callback_query(F.data.startswith("select_city_bulk_donor_"))
+async def process_select_city_bulk_donor(callback: types.CallbackQuery, state: FSMContext):
+    if not await check_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав.", show_alert=True)
+        return
+    city_id = int(callback.data.split('_')[-1])
+    await state.update_data(target_city_id=city_id)
+    await callback.message.edit_text("Теперь отправьте список юзернеймов или ссылок на каналы-доноры, каждый с новой строки (например, @donor_news или https://t.me/donor_channel):")
+    await state.set_state(AdminStates.waiting_for_bulk_donor_list)
+    await callback.answer()
+
+@admin_dp.message(AdminStates.waiting_for_bulk_donor_list)
+async def process_bulk_donor_list(message: types.Message, state: FSMContext):
+    if not await check_admin(message.from_user.id): return
+    donor_identifiers = message.text.strip().split('\n')
+    user_data = await state.get_data()
+    target_city_id = user_data['target_city_id']
+    
+    results = []
+    async for session in get_session():
+        city = await session.get(City, target_city_id)
+        if not city:
+            await message.answer("Выбранный городской канал не найден.")
+            await state.clear()
+            return
+
+        for identifier in donor_identifiers:
+            identifier = identifier.strip()
+            if not identifier:
+                continue
+
+            donor_telegram_id, donor_title = await resolve_channel_id(identifier)
+
+            if donor_telegram_id is None:
+                results.append(f"❌ Не удалось определить ID для '{identifier}'")
+                continue
+
+            existing_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == donor_telegram_id))
+            if existing_donor.scalar_one_or_none():
+                results.append(f"⚠️ Донор '{identifier}' (ID: `{donor_telegram_id}`) уже существует. Пропущен.")
+                continue
+            
+            if not donor_title:
+                donor_title = f"Канал ID {donor_telegram_id}"
+
+            new_donor = DonorChannel(telegram_id=donor_telegram_id, title=donor_title, city_id=target_city_id)
+            session.add(new_donor)
+            await session.commit() # Коммитим каждую запись, чтобы видеть прогресс и избежать больших транзакций
+            results.append(f"✅ Донор '{donor_title}' (ID: `{donor_telegram_id}`) успешно привязан к '{city.title}'.")
+            logger.info(f"Админ {message.from_user.id} массово добавил донора {donor_telegram_id} к городу {target_city_id}")
+    
+    response_text = "Результаты массового добавления доноров:\n\n" + "\n".join(results)
+    await message.answer(response_text, parse_mode="Markdown")
+    await state.clear()
+
+
+# --- Удаление городского канала ---
+@admin_dp.message(Command("delete_city"))
+async def delete_city_command(message: types.Message, state: FSMContext):
+    if not await check_admin(message.from_user.id): return
+    async for session in get_session():
+        cities = await session.execute(select(City))
+        cities = cities.scalars().all()
+        if not cities:
+            await message.answer("Нет городских каналов для удаления.")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=city.title, callback_data=f"delete_city_{city.id}")] for city in cities
+        ])
+        await message.answer("Выберите городской канал, который хотите удалить (вместе со всеми его донорами):", reply_markup=keyboard)
+        await state.set_state(AdminStates.waiting_for_city_to_delete)
+
+@admin_dp.callback_query(F.data.startswith("delete_city_"))
+async def process_delete_city(callback: types.CallbackQuery, state: FSMContext):
+    if not await check_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав.", show_alert=True)
+        return
+    city_id = int(callback.data.split('_')[-1])
+
+    async for session in get_session():
+        city_stmt = select(City).where(City.id == city_id)
+        city_result = await session.execute(city_stmt)
+        city_to_delete = city_result.scalar_one_or_none()
+
+        if city_to_delete:
+            city_title = city_to_delete.title
+
+            # Удаляем все донорские каналы, привязанные к этому городу
+            delete_donors_stmt = delete(DonorChannel).where(DonorChannel.city_id == city_id)
+            await session.execute(delete_donors_stmt)
+            logger.info(f"Удалены доноры для города {city_title} (ID: {city_id}).")
+
+            # Удаляем сам городской канал
+            await session.delete(city_to_delete)
+            await session.commit()
+            await callback.message.edit_text(f"Городской канал '{city_title}' и все его доноры успешно удалены.")
+            logger.info(f"Админ {callback.from_user.id} удалил город: {city_title} ({city_id}) и его доноров.")
+        else:
+            await callback.message.edit_text("Городской канал не найден.")
+    await callback.answer()
+    await state.clear()
+
 
 # --- Включить/выключить авто-режим ---
 @admin_dp.message(Command("toggle_mode"))
@@ -407,7 +535,7 @@ async def handle_publish_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(f"Пост ID {post.id} уже обработан или не найден.")
     await callback.answer()
 
-@admin_dp.callback_query(F.data.startswith("edit_")) # НОВОЕ: Обработчик кнопки редактирования
+@admin_dp.callback_query(F.data.startswith("edit_")) # Обработчик кнопки редактирования
 async def handle_edit_callback(callback: types.CallbackQuery, state: FSMContext):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
@@ -430,7 +558,7 @@ async def handle_edit_callback(callback: types.CallbackQuery, state: FSMContext)
             await callback.message.edit_text(f"Пост ID {post.id} уже обработан или не найден для редактирования.")
     await callback.answer()
 
-@admin_dp.message(AdminStates.waiting_for_edited_text) # НОВОЕ: Обработчик нового текста
+@admin_dp.message(AdminStates.waiting_for_edited_text) # Обработчик нового текста
 async def process_edited_text(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
     user_data = await state.get_data()
@@ -487,12 +615,12 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
                 city = await session.get(City, post.city_id)
                 if city:
                     await callback.message.edit_text(
-                        f"Пост ID {post.id} переформулирован. Новая версия:\n```\n{rephrased_text[:1000]}\n```\n" # ИСПРАВЛЕНО: Форматирование
+                        f"Пост ID {post.id} переформулирован. Новая версия:\n```\n{rephrased_text[:1000]}\n```\n"
                         f"Выберите действие:",
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                             [
                                 InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
-                                InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"), # НОВОЕ: Кнопка редактирования
+                                InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"),
                                 InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
                                 InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
                             ]
@@ -552,7 +680,7 @@ async def process_post_id_for_replacement(message: types.Message, state: FSMCont
             await state.update_data(post_to_replace_id=post_id)
             await message.answer(
                 f"Вы выбрали пост ID {post.id}. Текущий текст:\n\n"
-                f"```\n{post.processed_text}\n```\n\n" # ИСПРАВЛЕНО: Форматирование в code block
+                f"```\n{post.processed_text}\n```\n\n"
                 f"Теперь введите новый текст для замены:"
             )
             await state.set_state(AdminStates.waiting_for_new_text_for_replacement)
@@ -594,7 +722,7 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
             await message.answer("Пост не найден.")
     await state.clear()
 
-# --- НОВОЕ: Отправка тестового сообщения ---
+# --- Отправка тестового сообщения ---
 @admin_dp.message(Command("send_test_message"))
 async def send_test_message_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
