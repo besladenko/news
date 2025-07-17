@@ -26,7 +26,7 @@ class Config:
     # Telethon API ID и Hash
     TELETHON_API_ID: int = int(os.getenv("API_ID"))
     TELETHON_API_HASH: str = os.getenv("API_HASH")
-
+    MAX_LINKS_IN_POST = int(os.getenv("MAX_LINKS_IN_POST", 1)) # Default to 3 links
     # ID чата администратора для модерации
     ADMIN_CHAT_ID: int = int(os.getenv("ADMIN_CHAT_ID"))
 
