@@ -7,7 +7,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 from loguru import logger
 
 from config import config
-from db.database import get_session
+# from db.database import get_session # <-- Original line: Removed direct import
+import db.database # <-- Changed: Import the module instead
 from db.models import Post, City, DonorChannel, ChannelSetting
 from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
@@ -97,7 +98,8 @@ async def process_new_donor_message(
     """
     logger.info(f"Начало обработки нового сообщения от донора {channel_id}, ID: {message_id}")
 
-    async for session in get_session():
+    # Use db.database.get_session instead of get_session directly
+    async for session in db.database.get_session():
         # --- Начало костыля для обработки ID канала ---
         # Telethon часто возвращает ID без префикса -100.
         # Проверяем оба варианта: raw ID и ID с префиксом -100.
