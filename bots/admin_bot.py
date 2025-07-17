@@ -384,6 +384,7 @@ async def show_rejected_logs(callback: types.CallbackQuery):
         stmt = select(Post).where(
             Post.status.in_([
                 "rejected_duplicate", 
+                "rejected_no_mask_defined", # <-- НОВЫЙ СТАТУС
                 "rejected_no_mask_match", 
                 "rejected_empty_after_clean",
                 "rejected_mask_error",
@@ -405,6 +406,8 @@ async def show_rejected_logs(callback: types.CallbackQuery):
             reason = "Неизвестно"
             if post.status == "rejected_duplicate":
                 reason = "Дубликат"
+            elif post.status == "rejected_no_mask_defined": # <-- НОВЫЙ СТАТУС
+                reason = "Маска не задана"
             elif post.status == "rejected_no_mask_match":
                 reason = "Не соответствует маске"
             elif post.status == "rejected_empty_after_clean":
@@ -520,7 +523,7 @@ async def replace_news_command(message: types.Message, state: FSMContext):
     await message.answer("Введите ID поста, который вы хотите заменить:")
     await state.set_state(AdminStates.waiting_for_post_id_to_replace)
 
-@admin_dp.message(AdminStates.waiting_for_post_id_to_replace)
+@admin_dp.message(AdminStates.waiting_for_id_to_replace)
 async def process_post_id_for_replacement(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
     try:
@@ -562,7 +565,7 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
 
         if post:
             post.processed_text = new_text
-            post.published_at = func.now()
+            post.published_at = func.now() # Обновляем время публикации
             await session.commit()
             await message.answer(f"Текст поста ID {post_id_to_replace} успешно обновлен в базе данных.")
             logger.info(f"Админ {message.from_user.id} заменил текст поста {post_id_to_replace}.")

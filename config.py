@@ -22,7 +22,7 @@ class Config:
     _api_id = os.getenv("API_ID")
     TELETHON_API_ID = int(_api_id) if _api_id else None
     TELETHON_API_HASH = os.getenv("API_HASH")
-    PHONE_NUMBER = os.getenv("PHONE_NUMBER")
+    PHONE_NUMBER = os.getenv("PHONE_NUMBER") # <-- ДОБАВЛЕНО: Номер телефона для Telethon
 
     # Путь для скачивания медиафайлов
     MEDIA_DOWNLOAD_DIR = os.getenv("MEDIA_DOWNLOAD_DIR", "media_downloads") # <-- ДОБАВЛЕНО
@@ -51,4 +51,4 @@ if __name__ == "__main__":
     print(f"POSTGRES_URL: {config.POSTGRES_URL[:10]}...")
     print(f"TELETHON_API_ID: {config.TELETHON_API_ID}")
     print(f"PHONE_NUMBER: {config.PHONE_NUMBER}")
-    print(f"MEDIA_DOWNLOAD_DIR: {config.MEDIA_DOWNLOAD_DIR}") # <-- ДОБАВЛЕНО
+    print(f"MEDIA_DOWNLOAD_DIR: {config.MEDIA_DOWNLOAD_DIR}")

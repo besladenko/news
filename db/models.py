@@ -55,7 +55,7 @@ class Post(Base):
     source_link = Column(String, nullable=True, comment="Ссылка на оригинальный пост/источник")
     is_advertisement = Column(Boolean, default=False, comment="Признак рекламного характера")
     is_duplicate = Column(Boolean, default=False, comment="Признак дубликата")
-    status = Column(String, default="pending", comment="Статус поста: pending, approved, rejected, published, rejected_no_mask_match, rejected_empty_after_clean") # <-- Обновлен комментарий
+    status = Column(String, default="pending", comment="Статус поста: pending, approved, rejected, published, rejected_no_mask_defined, rejected_no_mask_match, rejected_empty_after_clean, rejected_mask_error, rejected_processing_error") # <-- Обновлен комментарий
     published_at = Column(DateTime, nullable=True, comment="Время публикации в городском канале")
     created_at = Column(DateTime, default=func.now(), comment="Время создания записи")
     donor_channel_id = Column(Integer, ForeignKey('donor_channels.id'), nullable=False, comment="ID канала-донора")
