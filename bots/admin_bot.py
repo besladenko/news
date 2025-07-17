@@ -814,6 +814,6 @@ if __name__ == "__main__":
             async def stop(self): await self.client.disconnect()
 
         mock_parser = MockTelegramParser()
-        await mock_parser.start() # Убедимся, что клиент подключен для resolve_channel_id
+        await mock_parser.start() # Убедимся, что клиент подключен для resolve_channel_i
         await start_admin_bot(mock_parser) # Передаем фиктивный парсер
     asyncio.run(debug_main())
