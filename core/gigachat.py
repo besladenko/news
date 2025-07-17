@@ -63,6 +63,51 @@ class GigaChatAPI:
             await self._get_access_token()
         return self.access_token
 
+    async def _make_chat_request(self, payload: dict, retries: int = 3, backoff_factor: float = 1.0):
+        """
+        Внутренний метод для выполнения запросов к GigaChat API с ретраями и экспоненциальной задержкой.
+        """
+        for attempt in range(retries):
+            token = await self.get_token()
+            if not token:
+                logger.error("Не удалось получить access_token для GigaChat для выполнения запроса.")
+                return None
+
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}"
+            }
+
+            try:
+                logger.info(f"Отправка запроса в GigaChat (попытка {attempt + 1}/{retries}): {payload['messages'][0]['content'][:50]}...")
+                response = await self.http_client.post(self.chat_url, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                response_data = response.json()
+                if response_data and response_data.get("choices"):
+                    generated_text = response_data["choices"][0]["message"]["content"]
+                    logger.info(f"GigaChat ответ получен: {generated_text[:50]}...")
+                    return generated_text
+                else:
+                    logger.warning(f"Неожиданный формат ответа от GigaChat: {response_data}")
+                    return None
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429: # Too Many Requests
+                    wait_time = backoff_factor * (2 ** attempt)
+                    logger.warning(f"Получен 429 Too Many Requests от GigaChat. Повторная попытка через {wait_time:.2f} секунд...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Ошибка HTTP статуса от GigaChat API: {e.response.status_code} - {e.response.text}")
+                    return None
+            except httpx.RequestError as e:
+                logger.error(f"Ошибка запроса к GigaChat API: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Неизвестная ошибка при работе с GigaChat API: {e}")
+                return None
+        logger.error(f"Все {retries} попыток запроса к GigaChat API провалились.")
+        return None
+
     async def generate_text(self, prompt: str, model: str = "GigaChat:latest"):
         """
         Отправляет запрос на генерацию текста в GigaChat API.
@@ -70,16 +115,6 @@ class GigaChatAPI:
         :param model: Модель GigaChat для использования.
         :return: Сгенерированный текст или None в случае ошибки.
         """
-        token = await self.get_token()
-        if not token:
-            logger.error("Не удалось получить access_token для GigaChat.")
-            return None
-
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}"
-        }
         payload = {
             "model": model,
             "messages": [
@@ -91,28 +126,7 @@ class GigaChatAPI:
             "stream": False,
             "max_tokens": 500 # Ограничение на количество токенов в ответе
         }
-
-        try:
-            logger.info(f"Отправка запроса в GigaChat: {prompt[:50]}...")
-            response = await self.http_client.post(self.chat_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            response_data = response.json()
-            if response_data and response_data.get("choices"):
-                generated_text = response_data["choices"][0]["message"]["content"]
-                logger.info(f"GigaChat ответ получен: {generated_text[:50]}...")
-                return generated_text
-            else:
-                logger.warning(f"Неожиданный формат ответа от GigaChat: {response_data}")
-                return None
-        except httpx.RequestError as e:
-            logger.error(f"Ошибка запроса к GigaChat API: {e}")
-            return None
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Ошибка HTTP статуса от GigaChat API: {e.response.status_code} - {e.response.text}")
-            return None
-        except Exception as e:
-            logger.error(f"Неизвестная ошибка при работе с GigaChat API: {e}")
-            return None
+        return await self._make_chat_request(payload)
 
     async def check_advertisement(self, text: str) -> bool:
         """
