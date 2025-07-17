@@ -43,7 +43,8 @@ class Config:
             "ADMIN_CHAT_ID"
         ]
         for var in required_vars:
-            if not getattr(self, var):
+            # ИСПРАВЛЕНО: Обращаемся к атрибутам класса через Config, а не self
+            if not getattr(Config, var):
                 logger.error(f"Переменная окружения {var} не установлена. Проверьте ваш .env файл.")
                 raise ValueError(f"Отсутствует переменная окружения: {var}")
 
