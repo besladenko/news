@@ -1,43 +1,44 @@
-# db/database.py
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from db.models import Base
-from config import config
-import asyncio
-from loguru import logger
+    # db/database.py
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    from db.models import Base
+    from config import config
+    import asyncio
+    from loguru import logger
 
-# Создаем асинхронный движок SQLAlchemy
-engine = create_async_engine(config.POSTGRES_URL, echo=False) # echo=True для вывода SQL-запросов
+    # Создаем асинхронный движок SQLAlchemy
+    engine = create_async_engine(config.POSTGRES_URL, echo=False) # echo=True для вывода SQL-запросов
 
-# Создаем фабрику асинхронных сессий
-AsyncSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False # Важно, чтобы объекты не "истекали" после коммита
-)
+    # Создаем фабрику асинхронных сессий
+    AsyncSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False # Важно, чтобы объекты не "истекали" после коммита
+    )
 
-async def init_db():
-    """Инициализирует базу данных: создает все таблицы, если они не существуют."""
-    logger.info("Инициализация базы данных...")
-    async with engine.begin() as conn:
-        # ВНИМАНИЕ: Следующая строка удаляет ВСЕ таблицы. Используйте ОСТОРОЖНО, только для разработки!
-        # Если вы хотите сохранить данные, убедитесь, что эта строка ЗАКОММЕНТИРОВАНА.
-        # await conn.run_sync(Base.metadata.drop_all) # <-- УБЕДИТЕСЬ, ЧТО ЭТА СТРОКА ЗАКОММЕНТИРОВАНА!
-        # Создание всех таблиц (если они не существуют)
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("База данных инициализирована.")
+    async def init_db():
+        """Инициализирует базу данных: создает все таблицы, если они не существуют."""
+        logger.info("Инициализация базы данных...") # <-- Эта строка должна быть такой
+        async with engine.begin() as conn:
+            # ВНИМАНИЕ: Следующая строка удаляет ВСЕ таблицы. Используйте ОСТОРОЖНО, только для разработки!
+            # Если вы хотите сохранить данные, убедитесь, что эта строка ЗАКОММЕНТИРОВАНА.
+            # await conn.run_sync(Base.metadata.drop_all) # <-- Эта строка ДОЛЖНА быть закомментирована!
+            # Создание всех таблиц (если они не существуют)
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("База данных инициализирована.")
 
-async def get_session():
-    """Асинхронный генератор для получения сессии базы данных."""
-    async with AsyncSessionLocal() as session:
-        yield session
+    async def get_session():
+        """Асинхронный генератор для получения сессии базы данных."""
+        async with AsyncSessionLocal() as session:
+            yield session
 
-# Пример использования (для тестирования)
-async def main():
-    await init_db()
-    logger.info("База данных готова к работе.")
+    # Пример использования (для тестирования)
+    async def main():
+        await init_db()
+        logger.info("База данных готова к работе.")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    if __name__ == "__main__":
+        asyncio.run(main())
+    
