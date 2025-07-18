@@ -9,7 +9,7 @@ from loguru import logger
 from config import config
 from db.database import get_session
 from db.models import Post, City, DonorChannel, ChannelSetting
-# from core.gigachat import gigachat_api # <-- ИСПРАВЛЕНО: Удален импорт gigachat_api
+from core.gigachat import gigachat_api
 from core.deduplicator import deduplicator
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,34 +36,68 @@ async def cmd_start(message: types.Message):
     )
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
 
-async def _remove_promotional_links(text: str) -> str:
+def _normalize_text(text: str) -> str:
+    """
+    Нормализует текст: заменяет различные пробелы и переносы строк на стандартные,
+    чтобы обеспечить консистентность при сравнении и удалении масок.
+    """
+    if not text:
+        return ""
+    # Заменяем все виды пробелов (включая неразрывные) на обычные пробелы
+    normalized_text = re.sub(r'\s+', ' ', text).strip()
+    # Заменяем все виды переносов строк на '\n'
+    normalized_text = normalized_text.replace('\r\n', '\n').replace('\r', '\n')
+    # Удаляем множественные переносы строк, оставляя только один
+    normalized_text = re.sub(r'\n+', '\n', normalized_text)
+    return normalized_text.strip()
+
+async def _remove_promotional_links(text: str, literal_mask: str = None) -> str:
     """
     Удаляет из текста ссылки типа "Подписаться" и схожие рекламные подписи,
     особенно в конце поста.
+    :param text: Исходный текст поста.
+    :param literal_mask: Буквальная строка маски, которую нужно удалить из текста.
     """
     if not text:
         return ""
 
-    # 1. Удаление Telegram-ссылок в скобках (https://t.me/...)
-    # Пример: "Текст новости (https://t.me/channel)" -> "Текст новости"
-    text = re.sub(r'\s*\([^)]*https?://t\.me/[^)]*\)', '', text, flags=re.IGNORECASE)
+    original_text_normalized = _normalize_text(text) # Нормализуем текст поста
+    
+    # 1. Удаление буквальной маски, если она задана
+    if literal_mask:
+        normalized_literal_mask = _normalize_text(literal_mask) # Нормализуем маску
+        # Используем re.escape, чтобы специальные символы в маске обрабатывались как буквальные
+        # и re.DOTALL для обработки маски, которая может содержать несколько строк.
+        escaped_mask = re.escape(normalized_literal_mask)
+        
+        # Используем re.sub с флагом re.DOTALL, чтобы '.' соответствовал переносам строк
+        # и re.IGNORECASE для игнорирования регистра.
+        # Добавляем \s* вокруг, чтобы учесть возможные пробелы/переносы строк вокруг маски
+        original_text_normalized = re.sub(rf'\s*{escaped_mask}\s*', '', original_text_normalized, flags=re.IGNORECASE | re.DOTALL)
+        logger.info(f"Буквальная маска '{literal_mask[:50]}...' удалена из текста (после нормализации).")
+
+
+    # 2. Удаление Telegram-ссылок в скобках (https://t.me/...)
+    # Улучшено для обработки t.me/+ и других символов в пути ссылки
+    original_text_normalized = re.sub(r'\s*\([^)]*https?://t\.me/[^\s)]*\)', '', original_text_normalized, flags=re.IGNORECASE)
 
     # Улучшенные паттерны для удаления строк, которые являются рекламными подписями или ссылками.
     # Используем re.fullmatch для точного совпадения всей строки.
     promotional_line_patterns = [
-        # НОВОЕ: Паттерн для Markdown ссылок, например [Текст](URL)
+        # Паттерн для Markdown ссылок, например [Текст](URL)
         r'^\s*[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\[.*?\]\s*\(https?://[^\s)]+\)[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\s*$',
         # Линии, которые являются только URL-адресами или содержат URL с минимальным окружающим текстом/символами
         r'^\s*[\W_]*https?://[^\s)]+[\W_]*\s*$',
         # Общие рекламные фразы, с ссылкой или без, с учетом ведущих/завершающих символов/пробелов
-        r'^\s*[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\b(?:подписаться|наш канал|прислать новость|новости|канал|наш|подпишись|вступай|переходи|наш чат|наша группа|источник|подробнее|смотрите также|наш сайт|наш телеграм|наш telegram|наш тг|наш tg|наш паблик)\b.*?(?:https?://[^\s)]+)?[\W_]*\s*$',
+        # Добавлены новые ключевые слова для лучшего распознавания
+        r'^\s*[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\b(?:подписаться|наш канал|прислать новость|новости|канал|наш|подпишись|вступай|переходи|наш чат|наша группа|источник|подробнее|смотрите также|наш сайт|наш телеграм|наш telegram|наш тг|наш tg|наш паблик|проголосовать|голос|вконтакте|наш вк|наш youtube|наш инстаграм|наш facebook|наш twitter|наш дзен|наш рутуб|наш rutube|наш vk)\b.*?(?:https?://[^\s)]+)?[\W_]*\s*$',
         # Линии, которые очень короткие и содержат ссылку, например, "Источник: ссылка"
         r'^\s*(?:источник|source|подробнее|details|link|ссылка|читать|read|join|присоединяйтесь|перейти|go)\s*[\W_]*https?://[^\s)]+[\W_]*\s*$',
         # Линии, которые являются просто короткими призывами к действию или ссылками на социальные сети
         r'^\s*[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*(?:@[\w_]+|t\.me/[\w_]+|vk\.com/[\w_]+|youtube\.com/[\w_]+|instagram\.com/[\w_]+|facebook\.com/[\w_]+)[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\s*$'
     ]
 
-    lines = text.split('\n')
+    lines = original_text_normalized.split('\n') # Работаем с нормализованным текстом
     cleaned_lines = []
     
     # Идем с конца, удаляя рекламные строки.
@@ -103,20 +137,24 @@ async def process_new_donor_message(
     """
     logger.info(f"Начало обработки нового сообщения от донора {channel_id}, ID: {message_id}")
 
-    async for session in get_session():
+    async for session in get_session(): # <-- Используем get_session напрямую
         # --- Начало костыля для обработки ID канала ---
+        # Telethon часто возвращает ID без префикса -100.
+        # Проверяем оба варианта: raw ID и ID с префиксом -100.
         possible_donor_ids = [channel_id]
-        if channel_id > 0:
+        if channel_id > 0: # Если ID положительный, добавляем вариант с -100
             possible_donor_ids.append(int(f"-100{channel_id}"))
-        elif str(channel_id).startswith('-100'):
+        elif str(channel_id).startswith('-100'): # Если уже с -100, добавляем raw ID
             try:
                 possible_donor_ids.append(int(str(channel_id)[4:]))
             except ValueError:
-                pass
+                pass # Если не удалось преобразовать, игнорируем
 
+        # Находим донорский канал по любому из возможных ID
         stmt_donor = select(DonorChannel).where(DonorChannel.telegram_id.in_(possible_donor_ids))
         result_donor = await session.execute(stmt_donor)
         donor_channel = result_donor.scalar_one_or_none()
+        # --- Конец костыля ---
 
         if not donor_channel:
             logger.warning(f"Сообщение от неизвестного донора (ID: {channel_id}). Пропускаем.")
@@ -137,7 +175,7 @@ async def process_new_donor_message(
             logger.info(f"Сообщение '{text[:50]}...' является дубликатом. Причина: {reason}. Не публикуем.")
             new_post = Post(
                 original_text=text,
-                image_url=media_paths[0] if media_paths else None,
+                image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
                 source_link=source_link,
                 is_duplicate=True,
                 status="rejected_duplicate",
@@ -149,42 +187,55 @@ async def process_new_donor_message(
             await session.commit()
             return
 
-        processed_text = text # Инициализируем processed_text оригинальным текстом
-        
-        # --- НОВОЕ: Обработка маски донора ---
-        is_mask_applied = False
-        if donor_channel.mask_pattern:
-            try:
-                # Экранируем маску, чтобы она воспринималась как буквальная строка, а не рег. выражение
-                escaped_mask = re.escape(donor_channel.mask_pattern)
-                match = re.search(escaped_mask, text, flags=re.IGNORECASE | re.DOTALL)
-                if match:
-                    # Если маска найдена, берем текст до маски
-                    processed_text = text[:match.start()].strip()
-                    is_mask_applied = True
-                    logger.info(f"Маска донора найдена и удалена для поста {message_id}. Текст до маски: '{processed_text[:50]}...'")
-                else:
-                    logger.info(f"Маска донора задана, но не найдена в тексте поста {message_id}. Применяем общую очистку.")
-            except Exception as e: # Ловим любые ошибки при работе с маской
-                logger.error(f"Ошибка при обработке маски для донора {donor_channel.title} (ID: {donor_channel.id}): {e}. Пост {message_id} будет обработан без учета маски.")
-                # Если ошибка в маске, падаем на общую очистку
-        
-        # Применяем общую очистку рекламных ссылок, если маска не была применена или была ошибка
-        if not is_mask_applied:
-            processed_text = await _remove_promotional_links(processed_text)
-            logger.info(f"Применена общая очистка рекламных ссылок для поста {message_id}.")
+        # 2. Проверка на рекламный характер
+        is_advertisement = await gigachat_api.check_advertisement(text)
+        if is_advertisement:
+            logger.info(f"Сообщение '{text[:50]}...' является рекламным. Отправляем на ручную модерацию.")
+            new_post = Post(
+                original_text=text,
+                processed_text=text, # Для рекламных постов processed_text равен original_text
+                image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
+                source_link=source_link,
+                is_advertisement=True,
+                is_duplicate=False,
+                status="pending",
+                donor_channel_id=donor_channel.id,
+                city_id=city.id,
+                original_message_id=message_id
+            )
+            session.add(new_post)
+            await session.commit()
+            await send_post_to_admin_panel(new_post.id, city.telegram_id, session, media_paths)
+            return
 
-        # Добавляем пользовательскую подпись
-        processed_text += f"\n\n{config.CUSTOM_SIGNATURE}"
-        logger.info(f"Добавлена пользовательская подпись для поста {message_id}.")
+        # 3. Проверка на ключевые слова для пропуска переформулирования
+        skip_rephrasing_keywords = ["бпла", "ракетная опасность"]
+        should_skip_rephrasing = False
+        for keyword in text.lower().split(): # Разделяем текст на слова для более точного поиска
+            if keyword in skip_rephrasing_keywords:
+                should_skip_rephrasing = True
+                break
+        
+        if should_skip_rephrasing:
+            processed_text = text # Используем оригинальный текст
+            logger.info(f"Сообщение '{text[:50]}...' содержит ключевые слова ({' или '.join(skip_rephrasing_keywords)}). Переформулирование пропущено.")
+        else:
+            # 4. Переформулирование текста
+            processed_text = await gigachat_api.rephrase_text(text)
+            if not processed_text:
+                logger.warning(f"Не удалось переформулировать текст для '{text[:50]}...'. Используем оригинал.")
+                processed_text = text
 
+        # 5. Удаление рекламных ссылок и подписей (применяется всегда)
+        # Передаем literal_mask из donor_channel.mask_pattern
+        processed_text = await _remove_promotional_links(processed_text, donor_channel.mask_pattern)
         if not processed_text.strip(): # Если после очистки текст стал пустым
-            logger.warning(f"Текст поста (ID: {message_id}) стал пустым после обработки маски/удаления ссылок. Пропускаем.")
+            logger.warning(f"Текст поста (ID: {message_id}) стал пустым после удаления рекламных ссылок. Пропускаем.")
             new_post = Post(
                 original_text=text,
                 image_url=media_paths[0] if media_paths else None,
                 source_link=source_link,
-                is_advertisement=False, # GigaChat отключен, поэтому всегда False
+                is_advertisement=False,
                 is_duplicate=False,
                 status="rejected_empty_after_clean",
                 donor_channel_id=donor_channel.id,
@@ -195,15 +246,16 @@ async def process_new_donor_message(
             await session.commit()
             return
 
-        # Сохранение поста в БД
+
+        # 6. Сохранение поста в БД
         new_post = Post(
             original_text=text,
             processed_text=processed_text,
-            image_url=media_paths[0] if media_paths else None,
+            image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
             source_link=source_link,
-            is_advertisement=False, # GigaChat отключен, поэтому всегда False
+            is_advertisement=False,
             is_duplicate=False,
-            status="pending", # Всегда "pending" перед публикацией/модерацией
+            status="pending",
             donor_channel_id=donor_channel.id,
             city_id=city.id,
             original_message_id=message_id
@@ -212,7 +264,7 @@ async def process_new_donor_message(
         await session.commit()
         logger.info(f"Новый пост (ID: {new_post.id}) сохранен в БД со статусом 'pending'.")
 
-        # Публикация или отправка на модерацию
+        # 7. Публикация или отправка на модерацию
         if city.auto_mode:
             await publish_post(new_post.id, city.telegram_id, session, media_paths)
         else:
@@ -321,18 +373,19 @@ async def send_post_to_admin_panel(post_id: int, target_telegram_channel_id: int
     message_for_admin = (
         f"🚨 *Новый пост для модерации* (ID: `{post.id}`)\n"
         f"Канал назначения: `{target_telegram_channel_id}`\n"
-        f"Статус: {'Реклама' if post.is_advertisement else 'Ожидает'}\n\n" # is_advertisement всегда False теперь
-        f"Оригинал:\n```\n{post.original_text[:1000]}\n```\n\n"
-        f"Предложено:\n```\n{post.processed_text[:1000]}\n```\n"
+        f"Статус: {'Реклама' if post.is_advertisement else 'Ожидает'}\n\n"
+        f"Оригинал:\n```\n{post.original_text[:1000]}\n```\n\n" # Форматирование в code block
+        f"Предложено:\n```\n{post.processed_text[:1000]}\n```\n" # Форматирование в code block
     )
-    # if post.is_advertisement: # <-- ИСПРАВЛЕНО: Этот блок теперь не нужен
-    #     message_for_admin += "\n_GigaChat пометил как рекламное._"
+    if post.is_advertisement:
+        message_for_admin += "\n_GigaChat пометил как рекламное._"
 
     # Создаем инлайн-кнопки
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
-            # InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"), # <-- ИСПРАВЛЕНО: Кнопка удалена
+            InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"), # НОВОЕ: Кнопка редактирования
+            InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
             InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
         ]
     ])
@@ -395,10 +448,56 @@ async def send_post_to_admin_panel(post_id: int, target_telegram_channel_id: int
 # Запуск бота
 async def start_news_bot():
     logger.info("Запуск основного Telegram бота...")
+    # Пропускаем все накопившиеся обновления
     await dp.start_polling(bot)
     logger.info("Основной Telegram бот остановлен.")
 
 if __name__ == "__main__":
     async def debug_main():
+        class MockTelethonClient:
+            def __init__(self):
+                self._connected = False
+            async def start(self): self._connected = True
+            async def disconnect(self): self._connected = False
+            def is_connected(self): return self._connected
+            async def get_entity(self, identifier):
+                if identifier == "@test_channel" or identifier == "-1001234567890":
+                    class MockChannel:
+                        id = 1234567890
+                        title = "Тестовый Канал"
+                    return MockChannel()
+                raise UsernameNotOccupiedError("Test error")
+
+        class MockTelegramParser:
+            def __init__(self):
+                self.client = MockTelethonClient()
+            def add_message_handler(self, handler_func): pass
+            async def start(self): await self.client.start()
+            async def stop(self): await self.client.disconnect()
+
+        mock_parser = MockTelegramParser()
+        await mock_parser.start()
+        # await set_telegram_parser_instance_for_news_bot(mock_parser) # Не используется в этом контексте
+
+        from db.database import init_db
+        await init_db()
+
+        async for session in get_session():
+            test_city = await session.execute(select(City).where(City.telegram_id == -1002705093365))
+            test_city = test_city.scalar_one_or_none()
+            if not test_city:
+                test_city = City(telegram_id=-1002705093365, title="Тестовый Город", auto_mode=True)
+                session.add(test_city)
+                await session.commit()
+                logger.info("Добавлен тестовый город для отладки.")
+            
+            test_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == 1481151436))
+            test_donor = test_donor.scalar_one_or_none()
+            if not test_donor:
+                test_donor = DonorChannel(telegram_id=1481151436, title="Тестовый Донор", city_id=test_city.id)
+                session.add(test_donor)
+                await session.commit()
+                logger.info("Добавлен тестовый донор для отладки.")
+
         await start_news_bot()
     asyncio.run(debug_main())

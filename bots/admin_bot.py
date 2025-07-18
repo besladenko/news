@@ -9,14 +9,14 @@ from sqlalchemy.future import select
 from sqlalchemy import func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
-# import re # <-- ИСПРАВЛЕНО: Удален импорт re, так как маски теперь хранятся как буквальные строки
-from telethon import TelegramClient # <-- Добавлен импорт TelethonClient
-from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError # <-- Добавлен импорт ошибок Telethon
+import re # <-- Добавлен импорт re
+from telethon import TelegramClient
+from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError
 
 from config import config
 from db.database import get_session
 from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
-# from core.gigachat import gigachat_api # <-- Удален импорт, так как GigaChat отключен
+from core.gigachat import gigachat_api
 from bots.news_bot import publish_post # Импортируем функцию публикации из основного бота
 
 # Инициализация админ-бота
@@ -34,11 +34,24 @@ class AdminStates(StatesGroup):
     waiting_for_donor_input = State()
     waiting_for_city_to_assign_donor = State()
     waiting_for_city_to_toggle_mode = State()
-    waiting_for_post_id_to_rephrase = State() # Оставляем для совместимости, но кнопка удалена
+    waiting_for_post_id_to_rephrase = State()
     waiting_for_post_id_to_replace = State()
     waiting_for_new_text_for_replacement = State()
     waiting_for_donor_to_set_mask = State()
     waiting_for_mask_pattern_input = State()
+
+# --- Вспомогательная функция для нормализации текста ---
+def _normalize_text(text: str) -> str:
+    """Нормализует текст: заменяет различные пробелы и переносы строк на стандартные."""
+    if not text:
+        return ""
+    # Заменяем все виды пробелов (включая неразрывные) на обычные пробелы
+    normalized_text = re.sub(r'\s+', ' ', text).strip()
+    # Заменяем все виды переносов строк на '\n'
+    normalized_text = normalized_text.replace('\r\n', '\n').replace('\r', '\n')
+    # Удаляем множественные переносы строк, оставляя только один
+    normalized_text = re.sub(r'\n+', '\n', normalized_text)
+    return normalized_text.strip()
 
 
 # --- Middleware для проверки админ-прав ---
@@ -318,13 +331,13 @@ async def process_mask_pattern_input(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     target_donor_id = user_data['target_donor_id_for_mask']
     
-    new_mask_pattern = message.text.strip()
+    new_mask_pattern_raw = message.text.strip()
     
-    if new_mask_pattern.lower() == "/clear_mask":
+    if new_mask_pattern_raw.lower() == "/clear_mask":
         new_mask_pattern = None # Устанавливаем None для удаления маски
         action_message = "Маска удалена."
     else:
-        # <-- ИСПРАВЛЕНО: Маска сохраняется как буквальная строка, без проверки re.compile
+        new_mask_pattern = _normalize_text(new_mask_pattern_raw) # <-- НОРМАЛИЗАЦИЯ МАСКИ ПЕРЕД СОХРАНЕНИЕМ
         action_message = f"Маска установлена: `{new_mask_pattern}`"
     
     async for session in get_session():
@@ -453,44 +466,44 @@ async def handle_publish_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(f"Пост ID {post.id} уже обработан или не найден.")
     await callback.answer()
 
-# @admin_dp.callback_query(F.data.startswith("rephrase_")) # <-- ИСПРАВЛЕНО: Закомментирован обработчик переформулирования
-# async def handle_rephrase_callback(callback: types.CallbackQuery):
-#     if not await check_admin(callback.from_user.id):
-#         await callback.answer("У вас нет прав.", show_alert=True)
-#         return
-#     post_id = int(callback.data.split('_')[1])
-#     async for session in get_session():
-#         stmt = select(Post).where(Post.id == post_id)
-#         result = await session.execute(stmt)
-#         post = result.scalar_one_or_none()
+@admin_dp.callback_query(F.data.startswith("rephrase_")) # <-- ИСПРАВЛЕНО: Закомментирован обработчик переформулирования
+async def handle_rephrase_callback(callback: types.CallbackQuery):
+    if not await check_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав.", show_alert=True)
+        return
+    post_id = int(callback.data.split('_')[1])
+    async for session in get_session():
+        stmt = select(Post).where(Post.id == post_id)
+        result = await session.execute(stmt)
+        post = result.scalar_one_or_none()
 
-#         if post and post.status == "pending":
-#             await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
-#             rephrased_text = await gigachat_api.rephrase_text(post.original_text)
-#             if rephrased_text:
-#                 post.processed_text = rephrased_text
-#                 await session.commit()
-#                 city = await session.get(City, post.city_id)
-#                 if city:
-#                     await callback.message.edit_text(
-#                         f"Пост ID {post.id} переформулирован. Новая версия:\n{rephrased_text[:500]}...\n"
-#                         f"Выберите действие:",
-#                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-#                             [
-#                                 InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
-#                                 InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
-#                                 InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
-#                             ]
-#                         ])
-#                     )
-#                     logger.info(f"Админ {callback.from_user.id} переформулировал пост {post.id}.")
-#                 else:
-#                     await callback.message.edit_text(f"Ошибка: Городской канал для поста {post.id} не найден.")
-#             else:
-#                 await callback.message.edit_text(f"Не удалось переформулировать пост ID {post.id}.")
-#         else:
-#             await callback.message.edit_text(f"Пост ID {post.id} уже обработан или не найден.")
-#     await callback.answer()
+        if post and post.status == "pending":
+            await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
+            rephrased_text = await gigachat_api.rephrase_text(post.original_text)
+            if rephrased_text:
+                post.processed_text = rephrased_text
+                await session.commit()
+                city = await session.get(City, post.city_id)
+                if city:
+                    await callback.message.edit_text(
+                        f"Пост ID {post.id} переформулирован. Новая версия:\n{rephrased_text[:500]}...\n"
+                        f"Выберите действие:",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [
+                                InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
+                                InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
+                                InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
+                            ]
+                        ])
+                    )
+                    logger.info(f"Админ {callback.from_user.id} переформулировал пост {post.id}.")
+                else:
+                    await callback.message.edit_text(f"Ошибка: Городской канал для поста {post.id} не найден.")
+            else:
+                await callback.message.edit_text(f"Не удалось переформулировать пост ID {post.id}.")
+        else:
+            await callback.message.edit_text(f"Пост ID {post.id} уже обработан или не найден.")
+    await callback.answer()
 
 @admin_dp.callback_query(F.data.startswith("delete_"))
 async def handle_delete_callback(callback: types.CallbackQuery):
