@@ -8,53 +8,33 @@ from loguru import logger
 from sqlalchemy.future import select
 from sqlalchemy import func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-import asyncio
-import re # <-- Добавлен импорт re
-from telethon import TelegramClient
-from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError
 
 from config import config
-from db.database import get_session
-from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
+from db.database import get_session # <-- ИСПРАВЛЕНО: Прямой импорт get_session
+from db.models import Admin, City, DonorChannel, Post, Duplicate # <-- ИСПРАВЛЕНО: Удален импорт ChannelSetting
 from core.gigachat import gigachat_api
 from bots.news_bot import publish_post # Импортируем функцию публикации из основного бота
+import asyncio
 
 # Инициализация админ-бота
 admin_bot = Bot(token=config.ADMIN_BOT_TOKEN)
 admin_dp = Dispatcher()
 
-# Инициализация Telethon клиента для админ-бота (для получения ID каналов)
-# Этот клиент используется для получения entity (ID и названия) по юзернейму/ссылке
-admin_telethon_client = TelegramClient('admin_telethon_session', config.TELETHON_API_ID, config.TELETHON_API_HASH)
-
 # Состояния для FSM админ-бота
 class AdminStates(StatesGroup):
     """Состояния для диалогов админ-бота."""
-    waiting_for_city_input = State()
-    waiting_for_donor_input = State()
+    waiting_for_city_input = State() # Изменено для приема юзернейма/ссылки
+    waiting_for_donor_input = State() # Изменено для приема юзернейма/ссылки
     waiting_for_city_to_assign_donor = State()
     waiting_for_city_to_toggle_mode = State()
     waiting_for_post_id_to_rephrase = State()
     waiting_for_post_id_to_replace = State()
     waiting_for_new_text_for_replacement = State()
-    waiting_for_donor_to_set_mask = State()
-    waiting_for_mask_pattern_input = State()
-
-# --- Вспомогательная функция для нормализации текста ---
-def _normalize_text(text: str) -> str:
-    """Нормализует текст: заменяет различные пробелы и переносы строк на стандартные."""
-    if not text:
-        return ""
-    # Заменяем все виды пробелов (включая неразрывные) на обычные пробелы
-    normalized_text = re.sub(r'\s+', ' ', text).strip()
-    # Заменяем все виды переносов строк на '\n'
-    normalized_text = normalized_text.replace('\r\n', '\n').replace('\r', '\n')
-    # Удаляем множественные переносы строк, оставляя только один
-    normalized_text = re.sub(r'\n+', '\n', normalized_text)
-    return normalized_text.strip()
 
 
 # --- Middleware для проверки админ-прав ---
+# Это упрощенная проверка. В реальном приложении нужна более надежная система
+# Например, с использованием декораторов или более сложного middleware
 async def check_admin(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь админом."""
     async for session in get_session():
@@ -78,7 +58,6 @@ async def cmd_admin_start(message: types.Message):
         "/add_donor - Назначить донора каналу\n"
         "/toggle_mode - Включить/выключить авто-режим для канала\n"
         "/list_channels - Список всех городских каналов\n"
-        "/set_mask_pattern - Установить/изменить маску для донора\n"
         "/logs - Просмотр логов публикаций/дубликатов\n"
         "/replace_news - Заменить опубликованную новость"
     )
@@ -88,30 +67,27 @@ async def cmd_admin_start(message: types.Message):
 @admin_dp.message(Command("add_city"))
 async def add_city_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    await message.answer("Введите юзернейм или ссылку на новый городской канал (например, @my_city_channel или https://t.me/my_city_channel):")
+    await message.answer("Введите Telegram ID нового городского канала (например, -1001234567890) и его название через запятую (например, -1001234567890, Мой Город):")
     await state.set_state(AdminStates.waiting_for_city_input)
 
 @admin_dp.message(AdminStates.waiting_for_city_input)
 async def process_city_input(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    channel_input = message.text.strip()
+    input_parts = message.text.strip().split(',', 1)
 
-    await message.answer("Пожалуйста, подождите, определяю ID канала...")
+    if len(input_parts) != 2:
+        await message.answer("Неверный формат. Пожалуйста, введите ID и название через запятую.")
+        await state.clear()
+        return
+
     try:
-        if not admin_telethon_client.is_connected():
-            await admin_telethon_client.start()
-            logger.info("Telethon клиент для админ-бота запущен.")
+        telegram_id = int(input_parts[0].strip())
+        city_name = input_parts[1].strip()
 
-        entity = await admin_telethon_client.get_entity(channel_input)
-        
-        if not (hasattr(entity, 'broadcast') and entity.broadcast) and \
-           not (hasattr(entity, 'megagroup') and entity.megagroup):
-            await message.answer("Это не канал или супергруппа Telegram. Пожалуйста, введите юзернейм или ссылку на канал/супергруппу.")
+        if not str(telegram_id).startswith('-100'):
+            await message.answer("Telegram ID канала должен начинаться с -100. Попробуйте еще раз.")
             await state.clear()
             return
-
-        telegram_id = int(f"-100{entity.id}")
-        channel_title = entity.title if entity.title else entity.username
 
         async for session in get_session():
             existing_city = await session.execute(select(City).where(City.telegram_id == telegram_id))
@@ -120,19 +96,19 @@ async def process_city_input(message: types.Message, state: FSMContext):
                 await state.clear()
                 return
 
-            new_city = City(telegram_id=telegram_id, title=channel_title)
+            new_city = City(telegram_id=telegram_id, title=city_name)
             session.add(new_city)
             await session.commit()
-            await message.answer(f"Городской канал '{channel_title}' (ID: `{telegram_id}`) успешно добавлен!")
-            logger.info(f"Админ {message.from_user.id} добавил город: {channel_title} ({telegram_id})")
-    except (ValueError, ChannelInvalidError, UsernameNotOccupiedError) as e:
-        logger.error(f"Ошибка при определении ID городского канала '{channel_input}': {e}")
-        await message.answer(f"Не удалось определить ID канала по введенным данным. Убедитесь, что юзернейм или ссылка корректны и канал существует. Ошибка: {e}")
+            await message.answer(f"Городской канал '{city_name}' (ID: `{telegram_id}`) успешно добавлен!")
+            logger.info(f"Админ {message.from_user.id} добавил город: {city_name} ({telegram_id})")
+    except ValueError:
+        await message.answer("Некорректный Telegram ID. Пожалуйста, введите число.")
     except Exception as e:
         logger.error(f"Непредвиденная ошибка при добавлении городского канала: {e}")
         await message.answer(f"Произошла непредвиденная ошибка: {e}")
     finally:
         await state.clear()
+
 
 # --- Назначить список доноров ---
 @admin_dp.message(Command("add_donor"))
@@ -158,35 +134,28 @@ async def process_select_city_donor(callback: types.CallbackQuery, state: FSMCon
         return
     city_id = int(callback.data.split('_')[-1])
     await state.update_data(target_city_id=city_id)
-    await callback.message.edit_text("Введите юзернейм или ссылку на канал-донор (например, @news_channel_name или https://t.me/news_channel_name):")
-    await state.set_state(AdminStates.waiting_for_donor_input)
+    await callback.message.edit_text("Введите Telegram ID канала-донора (например, -1001234567890) и его название через запятую (например, -1001234567890, Новости Донора):")
+    await state.set_state(AdminStates.waiting_for_donor_input) # ИСПРАВЛЕНО: Используем waiting_for_donor_input
     await callback.answer()
 
-@admin_dp.message(AdminStates.waiting_for_donor_input)
+@admin_dp.message(AdminStates.waiting_for_donor_input) # ИСПРАВЛЕНО: Используем waiting_for_donor_input
 async def process_donor_input(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    donor_input = message.text.strip()
+    input_parts = message.text.strip().split(',', 1)
     user_data = await state.get_data()
     target_city_id = user_data['target_city_id']
 
-    await message.answer("Пожалуйста, подождите, определяю ID канала-донора...")
+    if len(input_parts) != 2:
+        await message.answer("Неверный формат. Пожалуйста, введите ID и название через запятую.")
+        await state.clear()
+        return
+
     try:
-        if not admin_telethon_client.is_connected():
-            await admin_telethon_client.start()
-            logger.info("Telethon клиент для админ-бота запущен.")
-
-        entity = await admin_telethon_client.get_entity(donor_input)
-        
-        if not (hasattr(entity, 'broadcast') and entity.broadcast) and \
-           not (hasattr(entity, 'megagroup') and entity.megagroup):
-            await message.answer("Это не канал или супергруппа Telegram. Пожалуйста, введите юзернейм или ссылку на канал/супергруппу.")
-            await state.clear()
-            return
-
-        donor_telegram_id = int(f"-100{entity.id}")
-        donor_title = entity.title if entity.title else entity.username
+        donor_telegram_id = int(input_parts[0].strip())
+        donor_title = input_parts[1].strip()
 
         async for session in get_session():
+            # Проверим, существует ли уже такой донор
             existing_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == donor_telegram_id))
             if existing_donor.scalar_one_or_none():
                 await message.answer("Этот донор уже добавлен. Если вы хотите привязать его к другому городу, удалите его сначала.")
@@ -202,12 +171,11 @@ async def process_donor_input(message: types.Message, state: FSMContext):
 
             await message.answer(f"Донор '{donor_title}' (ID: `{donor_telegram_id}`) успешно привязан к каналу '{city_title}'!")
             logger.info(f"Админ {message.from_user.id} привязал донора {donor_telegram_id} к городу {target_city_id}")
-    except (ValueError, ChannelInvalidError, UsernameNotOccupiedError) as e:
-        logger.error(f"Ошибка при определении ID донорского канала '{donor_input}': {e}")
-        await message.answer(f"Не удалось определить ID донора по введенным данным. Убедитесь, что юзернейм или ссылка корректны и канал существует. Ошибка: {e}")
+    except ValueError:
+        await message.answer("Некорректный Telegram ID донора. Пожалуйста, введите число.")
     except Exception as e:
-        logger.error(f"Непредвиденная ошибка при добавлении донора: {e}")
-        await message.answer(f"Произошла непредвиденная ошибка: {e}")
+        await message.answer(f"Произошла ошибка при добавлении донора: {e}")
+        logger.error(f"Ошибка при добавлении донора: {e}")
     finally:
         await state.clear()
 
@@ -277,8 +245,7 @@ async def list_channels_command(message: types.Message):
             if donors:
                 response_text += "  Доноры:\n"
                 for donor in donors:
-                    mask_status = f"Маска: `{donor.mask_pattern}`" if donor.mask_pattern else "Маска: ❌ Не задана"
-                    response_text += f"    - {donor.title} (ID: `{donor.telegram_id}`) - {mask_status}\n"
+                    response_text += f"    - {donor.title} (ID: `{donor.telegram_id}`)\n"
             else:
                 response_text += "  Доноры: Нет\n"
             response_text += "\n"
@@ -286,78 +253,13 @@ async def list_channels_command(message: types.Message):
         await message.answer(response_text, parse_mode="Markdown")
     logger.info(f"Админ {message.from_user.id} запросил список каналов.")
 
-# --- Установка/изменение маски для донорского канала ---
-@admin_dp.message(Command("set_mask_pattern"))
-async def set_mask_pattern_command(message: types.Message, state: FSMContext):
-    if not await check_admin(message.from_user.id): return
-    async for session in get_session():
-        donors = await session.execute(select(DonorChannel).order_by(DonorChannel.title))
-        donors = donors.scalars().all()
-        if not donors:
-            await message.answer("Нет донорских каналов для настройки маски. Сначала добавьте доноров.")
-            return
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"{donor.title} (Маска: {'✅' if donor.mask_pattern else '❌'})", callback_data=f"select_donor_mask_{donor.id}")] for donor in donors
-        ])
-        await message.answer("Выберите донорский канал, для которого хотите установить/изменить маску:", reply_markup=keyboard)
-        await state.set_state(AdminStates.waiting_for_donor_to_set_mask)
-
-@admin_dp.callback_query(F.data.startswith("select_donor_mask_"))
-async def process_select_donor_mask(callback: types.CallbackQuery, state: FSMContext):
-    if not await check_admin(callback.from_user.id):
-        await callback.answer("У вас нет прав.", show_alert=True)
-        return
-    donor_id = int(callback.data.split('_')[-1])
-    await state.update_data(target_donor_id_for_mask=donor_id)
-    
-    async for session in get_session():
-        donor = await session.get(DonorChannel, donor_id)
-        if donor:
-            current_mask = donor.mask_pattern if donor.mask_pattern else "Не задана"
-            await callback.message.edit_text(
-                f"Вы выбрали донорский канал '{donor.title}'.\n"
-                f"Текущая маска: `{current_mask}`\n\n"
-                f"Введите новую маску (буквальный текст, который нужно удалить) или отправьте `/clear_mask`, чтобы удалить текущую маску:"
-            )
-            await state.set_state(AdminStates.waiting_for_mask_pattern_input)
-        else:
-            await callback.message.edit_text("Донорский канал не найден.")
-    await callback.answer()
-
-@admin_dp.message(AdminStates.waiting_for_mask_pattern_input)
-async def process_mask_pattern_input(message: types.Message, state: FSMContext):
-    if not await check_admin(message.from_user.id): return
-    user_data = await state.get_data()
-    target_donor_id = user_data['target_donor_id_for_mask']
-    
-    new_mask_pattern_raw = message.text.strip()
-    
-    if new_mask_pattern_raw.lower() == "/clear_mask":
-        new_mask_pattern = None # Устанавливаем None для удаления маски
-        action_message = "Маска удалена."
-    else:
-        new_mask_pattern = _normalize_text(new_mask_pattern_raw) # <-- НОРМАЛИЗАЦИЯ МАСКИ ПЕРЕД СОХРАНЕНИЕМ
-        action_message = f"Маска установлена: `{new_mask_pattern}`"
-    
-    async for session in get_session():
-        donor = await session.get(DonorChannel, target_donor_id)
-        if donor:
-            donor.mask_pattern = new_mask_pattern
-            await session.commit()
-            await message.answer(f"Для донора '{donor.title}': {action_message}")
-            logger.info(f"Админ {message.from_user.id} установил/изменил маску для донора {donor.title} на: {new_mask_pattern}")
-        else:
-            await message.answer("Донорский канал не найден.")
-    await state.clear()
-
 # --- Просмотр логов ---
 @admin_dp.message(Command("logs"))
 async def logs_command(message: types.Message):
     if not await check_admin(message.from_user.id): return
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="История публикаций", callback_data="show_published_logs")],
-        [InlineKeyboardButton(text="Отклоненные посты", callback_data="show_rejected_logs")]
+        [InlineKeyboardButton(text="Удаленные дубликаты", callback_data="show_duplicate_logs")]
     ])
     await message.answer("Выберите тип логов:", reply_markup=keyboard)
 
@@ -387,55 +289,28 @@ async def show_published_logs(callback: types.CallbackQuery):
         await callback.message.edit_text(response_text, parse_mode="Markdown")
     await callback.answer()
 
-@admin_dp.callback_query(F.data == "show_rejected_logs")
-async def show_rejected_logs(callback: types.CallbackQuery):
+@admin_dp.callback_query(F.data == "show_duplicate_logs")
+async def show_duplicate_logs(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     async for session in get_session():
-        # Выбираем все отклоненные посты, включая дубликаты и те, что не прошли маску
-        stmt = select(Post).where(
-            Post.status.in_([
-                "rejected_duplicate", 
-                "rejected_no_mask_defined",
-                "rejected_no_mask_match", 
-                "rejected_empty_after_clean",
-                "rejected_mask_error", # Оставляем, если вдруг в будущем захотим проверять рег. выражение
-                "rejected_processing_error"
-            ])
-        ).order_by(Post.created_at.desc()).limit(10)
-        rejected_posts = await session.execute(stmt)
-        rejected_posts = rejected_posts.scalars().all()
+        stmt = select(Post).where(Post.is_duplicate == True).order_by(Post.created_at.desc()).limit(10)
+        duplicate_posts = await session.execute(stmt)
+        duplicate_posts = duplicate_posts.scalars().all()
 
-        if not rejected_posts:
-            await callback.message.edit_text("Нет записей об отклоненных постах.")
+        if not duplicate_posts:
+            await callback.message.edit_text("Нет записей об удаленных дубликатах.")
             return
 
-        response_text = "Последние отклоненные посты:\n\n"
-        for post in rejected_posts:
+        response_text = "Последние удаленные дубликаты:\n\n"
+        for post in duplicate_posts:
             city = await session.get(City, post.city_id)
-            donor = await session.get(DonorChannel, post.donor_channel_id)
-            
-            reason = "Неизвестно"
-            if post.status == "rejected_duplicate":
-                reason = "Дубликат"
-            elif post.status == "rejected_no_mask_defined":
-                reason = "Маска не задана"
-            elif post.status == "rejected_no_mask_match":
-                reason = "Не соответствует маске"
-            elif post.status == "rejected_empty_after_clean":
-                reason = "Пустой после очистки"
-            elif post.status == "rejected_mask_error":
-                reason = "Ошибка в маске"
-            elif post.status == "rejected_processing_error":
-                reason = "Ошибка обработки"
-
             response_text += (
                 f"ID: `{post.id}`\n"
-                f"Канал (донор): {donor.title if donor else 'Неизвестно'}\n"
-                f"Канал (город): {city.title if city else 'Неизвестно'}\n"
+                f"Канал: {city.title if city else 'Неизвестно'}\n"
                 f"Текст: {post.original_text[:100]}...\n"
-                f"Причина: {reason}\n"
+                f"Причина: Дубликат\n" # Здесь можно получить более точную причину из таблицы duplicates
                 f"Обнаружено: {post.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
             )
         await callback.message.edit_text(response_text, parse_mode="Markdown")
@@ -456,6 +331,7 @@ async def handle_publish_callback(callback: types.CallbackQuery):
         if post and post.status == "pending":
             city = await session.get(City, post.city_id)
             if city:
+                # ИСПРАВЛЕНО: Передаем media_paths в publish_post
                 current_media_paths = [post.image_url] if post.image_url else []
                 await publish_post(post.id, city.telegram_id, session, current_media_paths)
                 await callback.message.edit_text(f"Пост ID {post.id} опубликован в канал '{city.title}'.")
@@ -466,7 +342,7 @@ async def handle_publish_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(f"Пост ID {post.id} уже обработан или не найден.")
     await callback.answer()
 
-@admin_dp.callback_query(F.data.startswith("rephrase_")) # <-- ИСПРАВЛЕНО: Закомментирован обработчик переформулирования
+@admin_dp.callback_query(F.data.startswith("rephrase_"))
 async def handle_rephrase_callback(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
@@ -483,6 +359,7 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
             if rephrased_text:
                 post.processed_text = rephrased_text
                 await session.commit()
+                # Отправляем обновленный пост на повторную модерацию
                 city = await session.get(City, post.city_id)
                 if city:
                     await callback.message.edit_text(
@@ -573,11 +450,21 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
         post = result.scalar_one_or_none()
 
         if post:
+            # В реальном Telegram API нет прямого метода "заменить сообщение" в канале.
+            # Обычно это делается так:
+            # 1. Удаляется старое сообщение (если есть его message_id в Telegram)
+            # 2. Отправляется новое сообщение
+            # Для простоты, мы просто обновим processed_text в БД.
+            # Если нужно реальное обновление в Telegram, потребуется хранить telegram_message_id в Post
+            # и использовать bot.edit_message_text или bot.delete_message + bot.send_message
             post.processed_text = new_text
             post.published_at = func.now() # Обновляем время публикации
             await session.commit()
             await message.answer(f"Текст поста ID {post_id_to_replace} успешно обновлен в базе данных.")
             logger.info(f"Админ {message.from_user.id} заменил текст поста {post_id_to_replace}.")
+            # TODO: Если нужно, отправить обновленный пост в Telegram канал
+            # Для этого потребуется сохранить telegram_message_id при первой публикации
+            # и использовать admin_bot.edit_message_text(chat_id=post.city.telegram_id, message_id=post.telegram_message_id, text=new_text)
         else:
             await message.answer("Пост не найден.")
     await state.clear()
@@ -586,12 +473,13 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
 # Запуск админ-бота
 async def start_admin_bot():
     logger.info("Запуск админского Telegram бота...")
-    await admin_telethon_client.start() # Запускаем Telethon клиент при старте админ-бота
-    logger.info("Telethon клиент для админ-бота запущен.")
+    # Пропускаем все накопившиеся обновления
     await admin_dp.start_polling(admin_bot)
     logger.info("Админский Telegram бот остановлен.")
 
 if __name__ == "__main__":
+    # Этот блок не будет запускаться напрямую, так как бот запускается через main.py
+    # Но для отладки можно временно запустить
     async def debug_main():
         await start_admin_bot()
     asyncio.run(debug_main())
