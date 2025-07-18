@@ -7,12 +7,13 @@ import os
 import datetime
 
 from config import config
+# from db.database import get_session # <-- УДАЛЕНО
+# import db.database # <-- УДАЛЕНО
 from db.models import DonorChannel, City, Post # db.models нужен для типизации, но не для сессий БД
 
 class TelegramParser:
-    def __init__(self, api_id, api_hash, phone_number): # <-- ИСПРАВЛЕНО: Добавлен phone_number
+    def __init__(self, api_id, api_hash):
         self.client = TelegramClient('telegram_parser_session', api_id, api_hash)
-        self.phone_number = phone_number # <-- ИСПРАВЛЕНО: Сохраняем номер телефона
         self.message_handlers = []
         self._is_running = False
 
@@ -52,14 +53,25 @@ class TelegramParser:
         if event.message.media:
             try:
                 # Создаем директорию для медиа, если ее нет
-                media_dir = config.MEDIA_DOWNLOAD_DIR # <-- ИСПРАВЛЕНО: Используем путь из конфига
+                media_dir = "media_downloads"
                 os.makedirs(media_dir, exist_ok=True)
 
                 # Скачиваем медиа
+                # Telethon автоматически определяет тип медиа (фото/видео)
+                # Если это альбом, event.message.media будет содержать MediaGroup
+                # Но events.NewMessage обрабатывает каждый элемент альбома как отдельное событие
+                # Для упрощения, мы будем скачивать только первое медиа, если это не альбом.
+                # Если это альбом, Telethon отправляет каждое фото/видео как отдельное сообщение,
+                # но с тем же album_id. Для корректной обработки альбомов,
+                # нужно собирать сообщения по album_id и обрабатывать их вместе.
+                # Пока что мы просто скачиваем каждое медиа, как оно приходит.
+                
+                # Получаем путь к файлу
                 file_name = f"{event.id}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
                 if isinstance(event.message.media, MessageMediaPhoto):
                     file_name += ".jpg"
                 elif isinstance(event.message.media, MessageMediaDocument):
+                    # Пытаемся получить расширение из документа
                     if event.message.media.document.mime_type:
                         mime_type = event.message.media.document.mime_type
                         if 'image/' in mime_type:
@@ -67,12 +79,13 @@ class TelegramParser:
                         elif 'video/' in mime_type:
                             file_name += "." + mime_type.split('/')[-1]
                         else:
-                            file_name += ".bin"
+                            file_name += ".bin" # Запасной вариант
                     else:
                         file_name += ".bin"
 
                 download_path = os.path.join(media_dir, file_name)
                 
+                # Скачиваем файл
                 downloaded_file = await self.client.download_media(event.message, file=download_path)
                 if downloaded_file:
                     media_paths.append(downloaded_file)
@@ -104,8 +117,7 @@ class TelegramParser:
 
         logger.info("Запуск парсера Telethon...")
         try:
-            # <-- ИСПРАВЛЕНО: Используем self.phone_number для авторизации
-            await self.client.start(phone=self.phone_number)
+            await self.client.start()
             logger.info("Парсер Telethon успешно подключен.")
             # Регистрируем обработчик для всех входящих новых сообщений
             self.client.add_event_handler(self._new_message_handler, events.NewMessage(incoming=True, func=lambda e: e.is_channel or e.is_private))
@@ -123,14 +135,16 @@ class TelegramParser:
             logger.info("Парсер Telethon остановлен.")
 
 # Создаем глобальный экземпляр парсера
-# <-- ИСПРАВЛЕНО: Передаем PHONE_NUMBER при создании экземпляра
-telegram_parser = TelegramParser(config.TELETHON_API_ID, config.TELETHON_API_HASH, config.PHONE_NUMBER)
+telegram_parser = TelegramParser(config.TELETHON_API_ID, config.TELETHON_API_HASH)
 
 if __name__ == "__main__":
     async def debug_main():
+        # Этот блок предназначен только для отладки parser.py отдельно
+        # В основном приложении он запускается через main.py
         logger.info("Запуск отладочного режима parser.py...")
         await telegram_parser.start()
         try:
+            # Держим клиент запущенным, чтобы он мог получать сообщения
             await asyncio.Event().wait()
         except KeyboardInterrupt:
             logger.info("Остановка отладочного режима parser.py.")
