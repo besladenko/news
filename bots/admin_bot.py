@@ -8,13 +8,16 @@ from loguru import logger
 from sqlalchemy.future import select
 from sqlalchemy import func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from telethon import TelegramClient
-from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError
+import asyncio
+import re # <-- ИСПРАВЛЕНО: Добавлен импорт модуля re
+from telethon import TelegramClient # <-- Добавлен импорт TelethonClient
+from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError # <-- Добавлен импорт ошибок Telethon
 
 from config import config
-import db.database
+from db.database import get_session
 from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
-import asyncio
+from core.gigachat import gigachat_api
+from bots.news_bot import publish_post # Импортируем функцию публикации из основного бота
 
 # Инициализация админ-бота
 admin_bot = Bot(token=config.ADMIN_BOT_TOKEN)
@@ -40,7 +43,7 @@ class AdminStates(StatesGroup):
 # --- Middleware для проверки админ-прав ---
 async def check_admin(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь админом."""
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(Admin).where(Admin.telegram_id == telegram_id)
         result = await session.execute(stmt)
         admin = result.scalar_one_or_none()
@@ -96,7 +99,7 @@ async def process_city_input(message: types.Message, state: FSMContext):
         telegram_id = int(f"-100{entity.id}")
         channel_title = entity.title if entity.title else entity.username
 
-        async for session in db.database.get_session():
+        async for session in get_session():
             existing_city = await session.execute(select(City).where(City.telegram_id == telegram_id))
             if existing_city.scalar_one_or_none():
                 await message.answer("Канал с таким Telegram ID уже существует.")
@@ -121,7 +124,7 @@ async def process_city_input(message: types.Message, state: FSMContext):
 @admin_dp.message(Command("add_donor"))
 async def add_donor_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    async for session in db.database.get_session():
+    async for session in get_session():
         cities = await session.execute(select(City))
         cities = cities.scalars().all()
         if not cities:
@@ -169,7 +172,7 @@ async def process_donor_input(message: types.Message, state: FSMContext):
         donor_telegram_id = int(f"-100{entity.id}")
         donor_title = entity.title if entity.title else entity.username
 
-        async for session in db.database.get_session():
+        async for session in get_session():
             existing_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == donor_telegram_id))
             if existing_donor.scalar_one_or_none():
                 await message.answer("Этот донор уже добавлен. Если вы хотите привязать его к другому городу, удалите его сначала.")
@@ -198,7 +201,7 @@ async def process_donor_input(message: types.Message, state: FSMContext):
 @admin_dp.message(Command("toggle_mode"))
 async def toggle_mode_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    async for session in db.database.get_session():
+    async for session in get_session():
         cities = await session.execute(select(City))
         cities = cities.scalars().all()
         if not cities:
@@ -218,7 +221,7 @@ async def process_toggle_mode(callback: types.CallbackQuery, state: FSMContext):
         return
     city_id = int(callback.data.split('_')[-1])
 
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(City).where(City.id == city_id)
         result = await session.execute(stmt)
         city = result.scalar_one_or_none()
@@ -238,7 +241,7 @@ async def process_toggle_mode(callback: types.CallbackQuery, state: FSMContext):
 @admin_dp.message(Command("list_channels"))
 async def list_channels_command(message: types.Message):
     if not await check_admin(message.from_user.id): return
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(City).order_by(City.title)
         cities = await session.execute(stmt)
         cities = cities.scalars().all()
@@ -273,7 +276,7 @@ async def list_channels_command(message: types.Message):
 @admin_dp.message(Command("set_mask_pattern"))
 async def set_mask_pattern_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    async for session in db.database.get_session():
+    async for session in get_session():
         donors = await session.execute(select(DonorChannel).order_by(DonorChannel.title))
         donors = donors.scalars().all()
         if not donors:
@@ -294,7 +297,7 @@ async def process_select_donor_mask(callback: types.CallbackQuery, state: FSMCon
     donor_id = int(callback.data.split('_')[-1])
     await state.update_data(target_donor_id_for_mask=donor_id)
     
-    async for session in db.database.get_session():
+    async for session in get_session():
         donor = await session.get(DonorChannel, donor_id)
         if donor:
             current_mask = donor.mask_pattern if donor.mask_pattern else "Не задана"
@@ -327,7 +330,7 @@ async def process_mask_pattern_input(message: types.Message, state: FSMContext):
             await message.answer(f"Ошибка в регулярном выражении: `{e}`. Пожалуйста, попробуйте еще раз или отправьте `/clear_mask`.")
             return # Не очищаем состояние, ждем корректный ввод
     
-    async for session in db.database.get_session():
+    async for session in get_session():
         donor = await session.get(DonorChannel, target_donor_id)
         if donor:
             donor.mask_pattern = new_mask_pattern
@@ -353,7 +356,7 @@ async def show_published_logs(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(Post).where(Post.status == "published").order_by(Post.published_at.desc()).limit(10)
         published_posts = await session.execute(stmt)
         published_posts = published_posts.scalars().all()
@@ -379,7 +382,8 @@ async def show_rejected_logs(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
-    async for session in db.database.get_session():
+    async for session in get_session():
+        # Выбираем все отклоненные посты, включая дубликаты и те, что не прошли маску
         stmt = select(Post).where(
             Post.status.in_([
                 "rejected_duplicate", 
@@ -434,13 +438,12 @@ async def handle_publish_callback(callback: types.CallbackQuery):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     post_id = int(callback.data.split('_')[1])
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(Post).where(Post.id == post_id)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
 
         if post and post.status == "pending":
-            from bots.news_bot import publish_post
             city = await session.get(City, post.city_id)
             if city:
                 current_media_paths = [post.image_url] if post.image_url else []
@@ -459,14 +462,13 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     post_id = int(callback.data.split('_')[1])
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(Post).where(Post.id == post_id)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
 
         if post and post.status == "pending":
             await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
-            from core.gigachat import gigachat_api
             rephrased_text = await gigachat_api.rephrase_text(post.original_text)
             if rephrased_text:
                 post.processed_text = rephrased_text
@@ -479,7 +481,6 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                             [
                                 InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
-                                InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"),
                                 InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
                                 InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
                             ]
@@ -500,7 +501,7 @@ async def handle_delete_callback(callback: types.CallbackQuery):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     post_id = int(callback.data.split('_')[1])
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(Post).where(Post.id == post_id)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
@@ -521,12 +522,12 @@ async def replace_news_command(message: types.Message, state: FSMContext):
     await message.answer("Введите ID поста, который вы хотите заменить:")
     await state.set_state(AdminStates.waiting_for_post_id_to_replace)
 
-@admin_dp.message(AdminStates.waiting_for_post_id_to_replace) # <-- ИСПРАВЛЕНО: Была опечатка
+@admin_dp.message(AdminStates.waiting_for_post_id_to_replace)
 async def process_post_id_for_replacement(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
     try:
         post_id = int(message.text.strip())
-        async for session in db.database.get_session():
+        async for session in get_session():
             stmt = select(Post).where(Post.id == post_id, Post.status == "published")
             result = await session.execute(stmt)
             post = result.scalar_one_or_none()
@@ -556,7 +557,7 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
     user_data = await state.get_data()
     post_id_to_replace = user_data['post_to_replace_id']
 
-    async for session in db.database.get_session():
+    async for session in get_session():
         stmt = select(Post).where(Post.id == post_id_to_replace)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
@@ -567,9 +568,6 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
             await session.commit()
             await message.answer(f"Текст поста ID {post_id_to_replace} успешно обновлен в базе данных.")
             logger.info(f"Админ {message.from_user.id} заменил текст поста {post_id_to_replace}.")
-            # TODO: Если нужно, отправить обновленный пост в Telegram канал
-            # Для этого потребуется сохранить telegram_message_id при первой публикации
-            # и использовать admin_bot.edit_message_text(chat_id=post.city.telegram_id, message_id=post.telegram_message_id, text=new_text)
         else:
             await message.answer("Пост не найден.")
     await state.clear()
@@ -578,13 +576,10 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
 # Запуск админ-бота
 async def start_admin_bot():
     logger.info("Запуск админского Telegram бота...")
-    # Пропускаем все накопившиеся обновления
     await admin_dp.start_polling(admin_bot)
     logger.info("Админский Telegram бот остановлен.")
 
 if __name__ == "__main__":
-    # Этот блок не будет запускаться напрямую, так как бот запускается через main.py
-    # Но для отладки можно временно запустить
     async def debug_main():
         await start_admin_bot()
     asyncio.run(debug_main())
