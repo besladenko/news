@@ -31,7 +31,7 @@ class Config:
     ADMIN_CHAT_ID: int = int(os.getenv("ADMIN_CHAT_ID"))
 
     # Пользовательская подпись для постов
-    CUSTOM_SIGNATURE: str = os.getenv("CUSTOM_SIGNATURE", "Подпишись на наш канал!") # <-- НОВОЕ: Пользовательская подпись
+    CUSTOM_SIGNATURE: str = os.getenv("CUSTOM_SIGNATURE", "") # <-- ОБНОВЛЕНО: Пользовательская подпись
 
     def __init__(self):
         self._validate_config()
