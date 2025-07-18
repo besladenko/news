@@ -24,7 +24,6 @@ class DonorChannel(Base):
     id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
     title = Column(String, nullable=False)
-    mask_pattern = Column(Text, nullable=True) # <-- Поле для хранения буквальной маски (тип Text)
     # ondelete='CASCADE' означает, что при удалении связанного City, этот DonorChannel также будет удален.
     city_id = Column(Integer, ForeignKey('cities.id', ondelete='CASCADE'), nullable=False) 
     
