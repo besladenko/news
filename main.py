@@ -1,52 +1,59 @@
+# main.py
 import asyncio
 from loguru import logger
 
 from config import config
-from db.database import init_db # <-- Оставляем импорт init_db, но не вызываем ее в main()
-from core.parser import telegram_parser
-from bots.news_bot import start_news_bot, set_telegram_parser_instance_for_news_bot, process_new_donor_message
-from bots.admin_bot import start_admin_bot, admin_dp # Импортируем admin_dp для регистрации обработчиков
-from core.gigachat import gigachat_api
+from db.database import init_db, get_session
+
+from core.parser import telegram_parser, TelegramParser
 from core.scheduler import scheduler
+from core.gigachat import gigachat_api # Оставляем импорт, но не вызываем
+from bots.news_bot import dp as news_dp, bot as news_bot, process_new_donor_message, start_news_bot
+from bots.admin_bot import admin_dp, admin_bot, start_admin_bot
+
+from sqlalchemy.future import select
+from db.models import DonorChannel, City
 
 async def main():
+    """Основная функция для запуска всех компонентов проекта."""
+    logger.add("file.log", rotation="500 MB") # Настройка логирования в файл
     logger.info("Запуск приложения Setinews...")
 
-    # Инициализация базы данных должна выполняться ОДИН РАЗ вручную
-    # (например, через python3 -c "import asyncio; from db.database import init_db; asyncio.run(init_db())")
-    # Убираем вызов init_db() отсюда, чтобы она не очищалась при каждом запуске бота.
-    # await init_db() # <-- УДАЛЕНО: НЕ ВЫЗЫВАЕМ init_db() ЗДЕСЬ!
+    # 1. Инициализация базы данных
+    await init_db()
 
-    # Инициализация GigaChat API (получение первого токена)
-    await gigachat_api.get_token()
-
-    # Добавление задачи обновления токена GigaChat в планировщик
-    scheduler.add_task(gigachat_api.get_token, 3000, "Обновление токена GigaChat")
-
-    # Запуск планировщика
-    await scheduler.start()
-
-    # Устанавливаем экземпляр парсера в news_bot
-    # Это нужно сделать до того, как парсер начнет слушать сообщения
-    await set_telegram_parser_instance_for_news_bot(telegram_parser)
-
-    # Регистрируем обработчик сообщений парсера в news_bot
+    # 2. Инициализация и запуск Telethon парсера
+    # Добавляем обработчик сообщений из парсера в наш процессор
     telegram_parser.add_message_handler(process_new_donor_message)
-
-    # Запуск Telethon парсера
     await telegram_parser.start()
 
-    # Запуск ботов
-    await asyncio.gather(
+    # 3. Запуск планировщика
+    # GigaChat отключен, поэтому задачу обновления токена убираем
+    # scheduler.add_task(gigachat_api.get_token, 15 * 60, "Обновление токена GigaChat")
+
+    await scheduler.start()
+
+    # 4. Запуск Telegram ботов
+    # Запускаем ботов в отдельных корутинах
+    bot_tasks = [
         start_news_bot(),
         start_admin_bot()
-    )
+    ]
+    
+    # Запускаем ботов параллельно
+    await asyncio.gather(*bot_tasks)
+
+    logger.info("Приложение Setinews завершено.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Приложение остановлено вручную.")
+        logger.info("Приложение остановлено пользователем.")
     except Exception as e:
         logger.error(f"Критическая ошибка в основном приложении: {e}")
-        asyncio.run(scheduler.stop()) # Убедимся, что планировщик останавливается
+    finally:
+        # Остановка Telethon клиента при завершении
+        asyncio.run(telegram_parser.stop())
+        # Остановка планировщика
+        asyncio.run(scheduler.stop())

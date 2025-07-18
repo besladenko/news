@@ -1,54 +1,69 @@
 # config.py
 import os
 from dotenv import load_dotenv
+from loguru import logger
 
-# Загружаем переменные окружения из файла .env
+# Загружаем переменные окружения из .env файла
 load_dotenv()
 
 class Config:
-    """Класс для хранения конфигурационных данных."""
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
-    ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID")) # ID чата для админских уведомлений
+    """Класс для хранения конфигурации приложения."""
 
-    GIGACHAT_CLIENT_ID = os.getenv("GIGACHAT_CLIENT_ID")
-    GIGACHAT_CLIENT_SECRET = os.getenv("GIGACHAT_CLIENT_SECRET")
-    GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY")
-    GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-    RQUUID = os.getenv("RQUUID") # Уникальный идентификатор запроса (UUID4)
+    # Telegram Bot API токены
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN")
+    ADMIN_BOT_TOKEN: str = os.getenv("ADMIN_BOT_TOKEN")
 
-    POSTGRES_URL = os.getenv("POSTGRES_URL")
+    # GigaChat API ключи (оставляем для совместимости, но не используем, если отключено)
+    GIGACHAT_CLIENT_ID: str = os.getenv("GIGACHAT_CLIENT_ID")
+    GIGACHAT_CLIENT_SECRET: str = os.getenv("GIGACHAT_CLIENT_SECRET")
+    GIGACHAT_AUTH_KEY: str = os.getenv("GIGACHAT_AUTH_KEY") # Base64(client_id:client_secret)
+    GIGACHAT_SCOPE: str = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+    RQUUID: str = os.getenv("RQUUID") # Уникальный идентификатор запроса (UUID4)
 
-    _api_id = os.getenv("API_ID")
-    TELETHON_API_ID = int(_api_id) if _api_id else None
-    TELETHON_API_HASH = os.getenv("API_HASH")
-    PHONE_NUMBER = os.getenv("PHONE_NUMBER") # <-- ДОБАВЛЕНО: Номер телефона для Telethon
+    # PostgreSQL URL
+    POSTGRES_URL: str = os.getenv("POSTGRES_URL")
 
-    # Путь для скачивания медиафайлов
-    MEDIA_DOWNLOAD_DIR = os.getenv("MEDIA_DOWNLOAD_DIR", "media_downloads") # <-- ДОБАВЛЕНО
+    # Telethon API ID и Hash
+    TELETHON_API_ID: int = int(os.getenv("API_ID"))
+    TELETHON_API_HASH: str = os.getenv("API_HASH")
 
-# Проверка наличия всех необходимых переменных после определения класса Config
-REQUIRED_VARS = [
-    "BOT_TOKEN", "ADMIN_BOT_TOKEN", "ADMIN_CHAT_ID",
-    "GIGACHAT_CLIENT_ID", "GIGACHAT_CLIENT_SECRET", "GIGACHAT_AUTH_KEY", "RQUUID",
-    "POSTGRES_URL", "TELETHON_API_ID", "TELETHON_API_HASH", "PHONE_NUMBER",
-    "MEDIA_DOWNLOAD_DIR" # <-- ДОБАВЛЕНО
-]
+    # ID чата администратора для модерации
+    ADMIN_CHAT_ID: int = int(os.getenv("ADMIN_CHAT_ID"))
 
-for var_name in REQUIRED_VARS:
-    if not getattr(Config, var_name):
-        raise ValueError(f"Переменная окружения '{var_name}' не найдена или пуста в .env файле.")
+    # Пользовательская подпись для постов
+    CUSTOM_SIGNATURE: str = os.getenv("CUSTOM_SIGNATURE", "Подпишись на наш канал!") # <-- НОВОЕ: Пользовательская подпись
 
-# Создаем экземпляр конфигурации
+    def __init__(self):
+        self._validate_config()
+
+    def _validate_config(self):
+        """Проверяет наличие всех необходимых переменных окружения."""
+        required_vars = [
+            "BOT_TOKEN", "ADMIN_BOT_TOKEN",
+            "POSTGRES_URL",
+            "TELETHON_API_ID", "TELETHON_API_HASH",
+            "ADMIN_CHAT_ID"
+        ]
+        # GigaChat переменные теперь опциональны, если GigaChat отключен
+        if os.getenv("GIGACHAT_ENABLED", "true").lower() == "true": # Пример флага для включения/выключения GigaChat
+             required_vars.extend(["GIGACHAT_CLIENT_ID", "GIGACHAT_CLIENT_SECRET", "GIGACHAT_AUTH_KEY", "RQUUID"])
+
+        for var in required_vars:
+            if not getattr(Config, var):
+                logger.error(f"Переменная окружения {var} не установлена. Проверьте ваш .env файл.")
+                raise ValueError(f"Отсутствует переменная окружения: {var}")
+
+# Создаем глобальный экземпляр конфигурации
 config = Config()
 
 if __name__ == "__main__":
-    # Пример использования и проверки
-    print(f"BOT_TOKEN: {config.BOT_TOKEN[:5]}...")
-    print(f"ADMIN_BOT_TOKEN: {config.ADMIN_BOT_TOKEN[:5]}...")
-    print(f"ADMIN_CHAT_ID: {config.ADMIN_CHAT_ID}")
-    print(f"GIGACHAT_CLIENT_ID: {config.GIGACHAT_CLIENT_ID[:5]}...")
-    print(f"POSTGRES_URL: {config.POSTGRES_URL[:10]}...")
-    print(f"TELETHON_API_ID: {config.TELETHON_API_ID}")
-    print(f"PHONE_NUMBER: {config.PHONE_NUMBER}")
-    print(f"MEDIA_DOWNLOAD_DIR: {config.MEDIA_DOWNLOAD_DIR}")
+    # Пример использования и проверки конфигурации
+    try:
+        logger.info("Конфигурация успешно загружена и проверена.")
+        logger.info(f"BOT_TOKEN (первые 5 символов): {config.BOT_TOKEN[:5]}...")
+        logger.info(f"POSTGRES_URL: {config.POSTGRES_URL}")
+        logger.info(f"TELETHON_API_ID: {config.TELETHON_API_ID}")
+        logger.info(f"ADMIN_CHAT_ID: {config.ADMIN_CHAT_ID}")
+        logger.info(f"CUSTOM_SIGNATURE: {config.CUSTOM_SIGNATURE}")
+    except ValueError as e:
+        logger.error(f"Ошибка конфигурации: {e}")
