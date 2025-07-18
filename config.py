@@ -26,6 +26,7 @@ class Config:
     # Telethon API ID и Hash
     TELETHON_API_ID: int = int(os.getenv("API_ID"))
     TELETHON_API_HASH: str = os.getenv("API_HASH")
+    PHONE_NUMBER: str = os.getenv("PHONE_NUMBER") # <-- НОВОЕ: Добавлен номер телефона для Telethon
 
     # ID чата администратора для модерации
     ADMIN_CHAT_ID: int = int(os.getenv("ADMIN_CHAT_ID"))
@@ -42,6 +43,7 @@ class Config:
             "BOT_TOKEN", "ADMIN_BOT_TOKEN",
             "POSTGRES_URL",
             "TELETHON_API_ID", "TELETHON_API_HASH",
+            "PHONE_NUMBER", # <-- НОВОЕ: Добавлен в обязательные переменные
             "ADMIN_CHAT_ID"
         ]
         # GigaChat переменные теперь опциональны, если GigaChat отключен
@@ -63,6 +65,8 @@ if __name__ == "__main__":
         logger.info(f"BOT_TOKEN (первые 5 символов): {config.BOT_TOKEN[:5]}...")
         logger.info(f"POSTGRES_URL: {config.POSTGRES_URL}")
         logger.info(f"TELETHON_API_ID: {config.TELETHON_API_ID}")
+        logger.info(f"TELETHON_API_HASH: {config.TELETHON_API_HASH[:5]}...")
+        logger.info(f"PHONE_NUMBER: {config.PHONE_NUMBER}")
         logger.info(f"ADMIN_CHAT_ID: {config.ADMIN_CHAT_ID}")
         logger.info(f"CUSTOM_SIGNATURE: {config.CUSTOM_SIGNATURE}")
     except ValueError as e:
