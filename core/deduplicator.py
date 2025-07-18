@@ -52,7 +52,7 @@ class Deduplicator:
             logger.info("TF-IDF векторизатор обучен.")
             
             # Вычисляем косинусное сходство
-            similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+            similarity = cosine_similarity(tfidf_matrix[0:1], tffidf_matrix[1:2])[0][0]
             return float(similarity)
         except Exception as e:
             logger.error(f"Ошибка при вычислении косинусного сходства: {e}")
