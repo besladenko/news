@@ -24,6 +24,7 @@ class DonorChannel(Base):
     id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
     title = Column(String, nullable=False)
+    mask_pattern = Column(Text, nullable=True) # <-- Поле для хранения буквальной маски (тип Text)
     # ondelete='CASCADE' означает, что при удалении связанного City, этот DonorChannel также будет удален.
     city_id = Column(Integer, ForeignKey('cities.id', ondelete='CASCADE'), nullable=False) 
     
@@ -40,6 +41,8 @@ class Post(Base):
     status = Column(String, default="pending") # pending, published, rejected
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     published_at = Column(DateTime(timezone=True), nullable=True)
+    source_link = Column(String, nullable=True) # Добавлено для хранения ссылки на оригинал
+    original_message_id = Column(BigInteger, nullable=True) # ID оригинального сообщения Telethon
 
     # ondelete='CASCADE' означает, что при удалении связанного City, этот Post также будет удален.
     city_id = Column(Integer, ForeignKey('cities.id', ondelete='CASCADE'), nullable=False) 
@@ -57,3 +60,14 @@ class Admin(Base):
     telegram_id = Column(BigInteger, unique=True, nullable=False)
     username = Column(String, nullable=True)
     is_super_admin = Column(Boolean, default=False)
+
+class Duplicate(Base): # <-- ДОБАВЛЕНА МОДЕЛЬ DUPLICATE
+    __tablename__ = 'duplicates'
+    id = Column(Integer, primary_key=True)
+    original_post_id = Column(Integer, ForeignKey('posts.id'), nullable=False)
+    duplicate_post_id = Column(Integer, ForeignKey('posts.id'), nullable=True) # Может быть NULL, если дубликат еще не в БД
+    reason = Column(String, nullable=True) # Например, 'text_match', 'image_match'
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    original_post = relationship("Post", foreign_keys=[original_post_id])
+    duplicate_post = relationship("Post", foreign_keys=[duplicate_post_id])
