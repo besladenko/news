@@ -7,7 +7,7 @@ import asyncio
 from loguru import logger
 
 # Создаем асинхронный движок SQLAlchemy
-engine = create_async_engine(config.POSTGRES_URL, echo=False) # echo=True для вывода SQL-запросов
+engine = create_async_engine(config.DATABASE_URL, echo=False)  # echo=True для вывода SQL-запросов
 
 # Создаем фабрику асинхронных сессий
 AsyncSessionLocal = sessionmaker(
