@@ -3,20 +3,21 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton # <-- Добавлены ReplyKeyboardMarkup, KeyboardButton
 from loguru import logger
 from sqlalchemy.future import select
 from sqlalchemy import func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from telethon import TelegramClient # <-- Добавлен импорт TelegramClient
-from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError # <-- Добавлены импорты ошибок Telethon
+from telethon import TelegramClient
+from telethon.errors import ChannelInvalidError, UsernameNotOccupiedError
+import re
 
 from config import config
-from db.database import get_session
+import db.database
 from db.models import Admin, City, DonorChannel, Post, Duplicate, ChannelSetting
-from core.gigachat import gigachat_api
-from bots.news_bot import publish_post # Импортируем функцию публикации из основного бота
 import asyncio
+from core.gigachat import gigachat_api # Импорт gigachat_api для переформулирования
+from bots.news_bot import publish_post, send_post_to_admin_panel # Импорт функций из news_bot
 
 # Инициализация админ-бота
 admin_bot = Bot(token=config.ADMIN_BOT_TOKEN)
@@ -28,8 +29,8 @@ admin_telethon_client = TelegramClient('admin_telethon_session', config.TELETHON
 # Состояния для FSM админ-бота
 class AdminStates(StatesGroup):
     """Состояния для диалогов админ-бота."""
-    waiting_for_city_input = State() # Изменено для приема юзернейма/ссылки
-    waiting_for_donor_input = State() # Изменено для приема юзернейма/ссылки
+    waiting_for_city_input = State()
+    waiting_for_donor_input = State()
     waiting_for_city_to_assign_donor = State()
     waiting_for_city_to_toggle_mode = State()
     waiting_for_post_id_to_rephrase = State()
@@ -42,7 +43,7 @@ class AdminStates(StatesGroup):
 # --- Middleware для проверки админ-прав ---
 async def check_admin(telegram_id: int) -> bool:
     """Проверяет, является ли пользователь админом."""
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(Admin).where(Admin.telegram_id == telegram_id)
         result = await session.execute(stmt)
         admin = result.scalar_one_or_none()
@@ -56,18 +57,68 @@ async def cmd_admin_start(message: types.Message):
         logger.warning(f"Неавторизованный доступ к админ-боту от {message.from_user.id}")
         return
 
+    # Создаем ReplyKeyboardMarkup для главного меню
+    main_menu_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Помощь")], # Кнопка "Помощь" будет вызывать этот же обработчик /start
+            [KeyboardButton(text="Добавить городской канал"), KeyboardButton(text="Привязать донора")],
+            [KeyboardButton(text="Переключить авто-режим"), KeyboardButton(text="Список каналов")],
+            [KeyboardButton(text="Установить маску"), KeyboardButton(text="Показать логи")],
+            [KeyboardButton(text="Заменить новость")]
+        ],
+        resize_keyboard=True, # Делает кнопки меньше
+        one_time_keyboard=False # Оставляет клавиатуру видимой
+    )
+
     await message.answer(
         "Добро пожаловать в админ-панель Setinews!\n"
-        "Используйте команды для управления:\n"
-        "/add_city - Добавить новый городской канал\n"
-        "/add_donor - Назначить донора каналу\n"
-        "/toggle_mode - Включить/выключить авто-режим для канала\n"
-        "/list_channels - Список всех городских каналов\n"
-        "/set_mask_pattern - Установить/изменить маску для донора\n"
-        "/logs - Просмотр логов публикаций/дубликатов\n"
-        "/replace_news - Заменить опубликованную новость"
+        "Используйте кнопки ниже для управления:",
+        reply_markup=main_menu_keyboard
     )
     logger.info(f"Админ {message.from_user.id} запустил админ-бота.")
+
+# --- Обработчики для кнопок главного меню ---
+@admin_dp.message(F.text == "Помощь")
+async def handle_help_button(message: types.Message):
+    """Обработчик кнопки 'Помощь'."""
+    await cmd_admin_start(message) # Повторно отправляем главное меню
+
+@admin_dp.message(F.text == "Добавить городской канал")
+async def handle_add_city_button(message: types.Message, state: FSMContext):
+    """Обработчик кнопки 'Добавить городской канал'."""
+    await add_city_command(message, state)
+
+@admin_dp.message(F.text == "Привязать донора")
+async def handle_add_donor_button(message: types.Message, state: FSMContext):
+    """Обработчик кнопки 'Привязать донора'."""
+    await add_donor_command(message, state)
+
+@admin_dp.message(F.text == "Переключить авто-режим")
+async def handle_toggle_mode_button(message: types.Message, state: FSMContext):
+    """Обработчик кнопки 'Переключить авто-режим'."""
+    await toggle_mode_command(message, state)
+
+@admin_dp.message(F.text == "Список каналов")
+async def handle_list_channels_button(message: types.Message):
+    """Обработчик кнопки 'Список каналов'."""
+    await list_channels_command(message)
+
+@admin_dp.message(F.text == "Установить маску")
+async def handle_set_mask_pattern_button(message: types.Message, state: FSMContext):
+    """Обработчик кнопки 'Установить маску'."""
+    await set_mask_pattern_command(message, state)
+
+@admin_dp.message(F.text == "Показать логи")
+async def handle_logs_button(message: types.Message):
+    """Обработчик кнопки 'Показать логи'."""
+    await logs_command(message)
+
+@admin_dp.message(F.text == "Заменить новость")
+async def handle_replace_news_button(message: types.Message, state: FSMContext):
+    """Обработчик кнопки 'Заменить новость'."""
+    await replace_news_command(message, state)
+# --- Конец обработчиков для кнопок главного меню ---
+
 
 # --- Добавление нового городского канала ---
 @admin_dp.message(Command("add_city"))
@@ -89,18 +140,16 @@ async def process_city_input(message: types.Message, state: FSMContext):
 
         entity = await admin_telethon_client.get_entity(channel_input)
         
-        # Проверяем, что это действительно канал или супергруппа
         if not (hasattr(entity, 'broadcast') and entity.broadcast) and \
            not (hasattr(entity, 'megagroup') and entity.megagroup):
             await message.answer("Это не канал или супергруппа Telegram. Пожалуйста, введите юзернейм или ссылку на канал/супергруппу.")
             await state.clear()
             return
 
-        # Telethon возвращает ID без префикса -100. Для Bot API нужен префикс.
         telegram_id = int(f"-100{entity.id}")
         channel_title = entity.title if entity.title else entity.username
 
-        async for session in get_session():
+        async for session in db.database.get_session():
             existing_city = await session.execute(select(City).where(City.telegram_id == telegram_id))
             if existing_city.scalar_one_or_none():
                 await message.answer("Канал с таким Telegram ID уже существует.")
@@ -125,7 +174,7 @@ async def process_city_input(message: types.Message, state: FSMContext):
 @admin_dp.message(Command("add_donor"))
 async def add_donor_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    async for session in get_session():
+    async for session in db.database.get_session():
         cities = await session.execute(select(City))
         cities = cities.scalars().all()
         if not cities:
@@ -164,18 +213,16 @@ async def process_donor_input(message: types.Message, state: FSMContext):
 
         entity = await admin_telethon_client.get_entity(donor_input)
         
-        # Проверяем, что это действительно канал или супергруппа
         if not (hasattr(entity, 'broadcast') and entity.broadcast) and \
            not (hasattr(entity, 'megagroup') and entity.megagroup):
             await message.answer("Это не канал или супергруппа Telegram. Пожалуйста, введите юзернейм или ссылку на канал/супергруппу.")
             await state.clear()
             return
 
-        # Telethon возвращает ID без префикса -100. Для Bot API нужен префикс.
         donor_telegram_id = int(f"-100{entity.id}")
         donor_title = entity.title if entity.title else entity.username
 
-        async for session in get_session():
+        async for session in db.database.get_session():
             existing_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == donor_telegram_id))
             if existing_donor.scalar_one_or_none():
                 await message.answer("Этот донор уже добавлен. Если вы хотите привязать его к другому городу, удалите его сначала.")
@@ -204,7 +251,7 @@ async def process_donor_input(message: types.Message, state: FSMContext):
 @admin_dp.message(Command("toggle_mode"))
 async def toggle_mode_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    async for session in get_session():
+    async for session in db.database.get_session():
         cities = await session.execute(select(City))
         cities = cities.scalars().all()
         if not cities:
@@ -224,7 +271,7 @@ async def process_toggle_mode(callback: types.CallbackQuery, state: FSMContext):
         return
     city_id = int(callback.data.split('_')[-1])
 
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(City).where(City.id == city_id)
         result = await session.execute(stmt)
         city = result.scalar_one_or_none()
@@ -244,7 +291,7 @@ async def process_toggle_mode(callback: types.CallbackQuery, state: FSMContext):
 @admin_dp.message(Command("list_channels"))
 async def list_channels_command(message: types.Message):
     if not await check_admin(message.from_user.id): return
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(City).order_by(City.title)
         cities = await session.execute(stmt)
         cities = cities.scalars().all()
@@ -279,7 +326,7 @@ async def list_channels_command(message: types.Message):
 @admin_dp.message(Command("set_mask_pattern"))
 async def set_mask_pattern_command(message: types.Message, state: FSMContext):
     if not await check_admin(message.from_user.id): return
-    async for session in get_session():
+    async for session in db.database.get_session():
         donors = await session.execute(select(DonorChannel).order_by(DonorChannel.title))
         donors = donors.scalars().all()
         if not donors:
@@ -300,7 +347,7 @@ async def process_select_donor_mask(callback: types.CallbackQuery, state: FSMCon
     donor_id = int(callback.data.split('_')[-1])
     await state.update_data(target_donor_id_for_mask=donor_id)
     
-    async for session in get_session():
+    async for session in db.database.get_session():
         donor = await session.get(DonorChannel, donor_id)
         if donor:
             current_mask = donor.mask_pattern if donor.mask_pattern else "Не задана"
@@ -333,7 +380,7 @@ async def process_mask_pattern_input(message: types.Message, state: FSMContext):
             await message.answer(f"Ошибка в регулярном выражении: `{e}`. Пожалуйста, попробуйте еще раз или отправьте `/clear_mask`.")
             return # Не очищаем состояние, ждем корректный ввод
     
-    async for session in get_session():
+    async for session in db.database.get_session():
         donor = await session.get(DonorChannel, target_donor_id)
         if donor:
             donor.mask_pattern = new_mask_pattern
@@ -359,7 +406,7 @@ async def show_published_logs(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(Post).where(Post.status == "published").order_by(Post.published_at.desc()).limit(10)
         published_posts = await session.execute(stmt)
         published_posts = published_posts.scalars().all()
@@ -385,7 +432,7 @@ async def show_rejected_logs(callback: types.CallbackQuery):
     if not await check_admin(callback.from_user.id):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
-    async for session in get_session():
+    async for session in db.database.get_session():
         # Выбираем все отклоненные посты, включая дубликаты и те, что не прошли маску
         stmt = select(Post).where(
             Post.status.in_([
@@ -441,13 +488,12 @@ async def handle_publish_callback(callback: types.CallbackQuery):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     post_id = int(callback.data.split('_')[1])
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(Post).where(Post.id == post_id)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
 
         if post and post.status == "pending":
-            from bots.news_bot import publish_post
             city = await session.get(City, post.city_id)
             if city:
                 current_media_paths = [post.image_url] if post.image_url else []
@@ -466,15 +512,14 @@ async def handle_rephrase_callback(callback: types.CallbackQuery):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     post_id = int(callback.data.split('_')[1])
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(Post).where(Post.id == post_id)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
 
         if post and post.status == "pending":
             await callback.message.edit_text(f"Переформулирую пост ID {post.id}...")
-            from core.gigachat import gigachat_api
-            rephrased_text = await gigachat_api.rephrase_text(post.original_text)
+            rephrased_text = await gigachat_api.rephrase_text(post.original_text) # Используем original_text для переформулирования
             if rephrased_text:
                 post.processed_text = rephrased_text
                 await session.commit()
@@ -507,7 +552,7 @@ async def handle_delete_callback(callback: types.CallbackQuery):
         await callback.answer("У вас нет прав.", show_alert=True)
         return
     post_id = int(callback.data.split('_')[1])
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(Post).where(Post.id == post_id)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
@@ -533,7 +578,7 @@ async def process_post_id_for_replacement(message: types.Message, state: FSMCont
     if not await check_admin(message.from_user.id): return
     try:
         post_id = int(message.text.strip())
-        async for session in get_session():
+        async for session in db.database.get_session():
             stmt = select(Post).where(Post.id == post_id, Post.status == "published")
             result = await session.execute(stmt)
             post = result.scalar_one_or_none()
@@ -563,7 +608,7 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
     user_data = await state.get_data()
     post_id_to_replace = user_data['post_to_replace_id']
 
-    async for session in get_session():
+    async for session in db.database.get_session():
         stmt = select(Post).where(Post.id == post_id_to_replace)
         result = await session.execute(stmt)
         post = result.scalar_one_or_none()
@@ -582,7 +627,6 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
 # Запуск админ-бота
 async def start_admin_bot():
     logger.info("Запуск админского Telegram бота...")
-    # Запускаем Telethon клиент для админ-бота
     if not admin_telethon_client.is_connected():
         await admin_telethon_client.start(phone=lambda: config.PHONE_NUMBER) # Используем лямбда-функцию для номера телефона
         logger.info("Telethon клиент для админ-бота запущен.")
