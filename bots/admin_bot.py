@@ -219,25 +219,25 @@ async def process_donor_input(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        donor_telegram_id = int(f"-100{entity.id}")
+        telegram_id = int(f"-100{entity.id}")
         donor_title = entity.title if entity.title else entity.username
 
         async for session in db.database.get_session():
-            existing_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == donor_telegram_id))
+            existing_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == telegram_id))
             if existing_donor.scalar_one_or_none():
                 await message.answer("Этот донор уже добавлен. Если вы хотите привязать его к другому городу, удалите его сначала.")
                 await state.clear()
                 return
 
-            new_donor = DonorChannel(telegram_id=donor_telegram_id, title=donor_title, city_id=target_city_id)
+            new_donor = DonorChannel(telegram_id=telegram_id, title=donor_title, city_id=target_city_id)
             session.add(new_donor)
             await session.commit()
 
             city = await session.execute(select(City).where(City.id == target_city_id))
             city_title = city.scalar_one().title
 
-            await message.answer(f"Донор '{donor_title}' (ID: `{donor_telegram_id}`) успешно привязан к каналу '{city_title}'!")
-            logger.info(f"Админ {message.from_user.id} привязал донора {donor_telegram_id} к городу {target_city_id}")
+            await message.answer(f"Донор '{donor_title}' (ID: `{telegram_id}`) успешно привязан к каналу '{city_title}'!")
+            logger.info(f"Админ {message.from_user.id} привязал донора {telegram_id} к городу {target_city_id}")
     except (ValueError, ChannelInvalidError, UsernameNotOccupiedError) as e:
         logger.error(f"Ошибка при определении ID донорского канала '{donor_input}': {e}")
         await message.answer(f"Не удалось определить ID донора по введенным данным. Убедитесь, что юзернейм или ссылка корректны и канал существует. Ошибка: {e}")
@@ -627,6 +627,13 @@ async def process_new_text_for_replacement(message: types.Message, state: FSMCon
 # Запуск админ-бота
 async def start_admin_bot():
     logger.info("Запуск админского Telegram бота...")
+    # Удаляем вебхук перед запуском long polling
+    try:
+        await admin_bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Вебхук админского бота успешно удален.")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить вебхук админского бота: {e}")
+
     if not admin_telethon_client.is_connected():
         await admin_telethon_client.start(phone=lambda: config.PHONE_NUMBER) # Используем лямбда-функцию для номера телефона
         logger.info("Telethon клиент для админ-бота запущен.")
