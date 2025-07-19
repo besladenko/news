@@ -1,464 +1,457 @@
 # bots/news_bot.py
-import asyncio
-import os
-import re
-from aiogram import Bot, Dispatcher, types
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from loguru import logger
-from sqlalchemy.future import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import func
 
 from config import config
-from db.database import get_session
-from db.models import City, DonorChannel, Post, Admin
+from db.database import get_session # <-- ИСПРАВЛЕНО: Прямой импорт get_session
+from db.models import Post, City, DonorChannel, ChannelSetting
+from core.gigachat import gigachat_api
+from core.deduplicator import deduplicator
+from sqlalchemy.future import select
+from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
+import datetime
+import re
+import os
 
 # Инициализация бота
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# Глобальная переменная для хранения экземпляра TelethonParser
-telegram_parser_instance = None
+# Состояния для FSM (Finite State Machine)
+class NewsBotStates(StatesGroup):
+    # Здесь можно определить состояния, если основной бот будет иметь диалоги с пользователями
+    # Например, для подписки на новости или настройки уведомлений
+    pass
 
-async def set_telegram_parser_instance_for_news_bot(parser_instance):
-    """Устанавливает экземпляр TelethonParser для использования в news_bot."""
-    global telegram_parser_instance
-    telegram_parser_instance = parser_instance
-    logger.info("Экземпляр TelethonParser установлен в news_bot.")
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    """Обработчик команды /start."""
+    await message.answer(
+        "Привет! Я бот городской новостной сети. Я буду автоматически публиковать новости в городские каналы."
+    )
+    logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
 
-def remove_advertisement_links(text: str) -> str:
-    """Удаляет потенциальные рекламные ссылки и @упоминания из текста."""
-    # Удаляем URL-ссылки (http/https), t.me, vk.com, instagram.com
-    cleaned_text = re.sub(r'https?://\S+|t\.me/\S+|vk\.com/\S+|instagram\.com/\S+', '', text, flags=re.IGNORECASE)
-    # Удаляем @username, которые могут быть ссылками на каналы/пользователей
-    cleaned_text = re.sub(r'@\w+', '', cleaned_text)
-    # Удаляем хештеги
-    cleaned_text = re.sub(r'#\w+', '', cleaned_text)
-    return cleaned_text.strip()
-
-def remove_call_to_action_paragraphs(text: str) -> str:
+async def _remove_promotional_links(text: str) -> str:
     """
-    Удаляет последние абзацы текста, если они содержат призывы к действию
-    или типичные рекламные фразы. Удаляет весь контент, начиная с первого
-    найденного абзаца-призыва до конца сообщения.
+    Удаляет из текста ссылки типа "Подписаться" и схожие рекламные подписи,
+    особенно в конце поста.
     """
-    paragraphs = text.split('\n\n') # Разбиваем текст на абзацы по двойному переносу строки
-    
-    # Ключевые слова и фразы для определения призыва к действию (регистронезависимо)
-    call_to_action_keywords = [
-        r'подпишись', r'подписывайтесь', r'переходи', r'переходите',
-        r'наш канал', r'на нашем канале', r'ссылка в профиле', r'читайте также',
-        r'больше новостей', r'все подробности', r'узнать подробнее',
-        r'присоединяйтесь', r'вступайте', r'наш сайт', r'наша группа',
-        r'активная ссылка', r'в шапке профиля', r'в описании канала',
-        r'для связи', r'по всем вопросам', r'пишите нам', r'звоните',
-        r'успей', r'скидки', r'акция', r'предложение', r'специальное предложение',
-        r'перейти по ссылке', r'жми', r'кликни', r'подробнее здесь',
-        r'источник', r'первоисточник', r'канал', r'группа', r'паблик',
-        r'наш телеграм', r'наш тг', r'наш тг-канал', r'наш телеграм-канал',
-        r'подробнее в нашем канале', r'подробнее по ссылке',
-        r'все самое интересное', r'не пропусти', r'будь в курсе', r'узнай первым',
-        r'реклама', r'на правах рекламы', r'по вопросам сотрудничества'
+    if not text:
+        return ""
+
+    # 1. Удаление Telegram-ссылок в скобках (https://t.me/...)
+    # Пример: "Текст новости (https://t.me/channel)" -> "Текст новости"
+    text = re.sub(r'\s*\([^)]*https?://t\.me/[^)]*\)', '', text, flags=re.IGNORECASE)
+
+    # Улучшенные паттерны для удаления строк, которые являются рекламными подписями или ссылками.
+    # Используем re.fullmatch для точного совпадения всей строки.
+    promotional_line_patterns = [
+        # Линии, которые являются только URL-адресами или содержат URL с минимальным окружающим текстом/символами
+        r'^\s*[\W_]*https?://[^\s)]+[\W_]*\s*$',
+        # Общие рекламные фразы, с ссылкой или без, с учетом ведущих/завершающих символов/пробелов
+        r'^\s*[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\b(?:подписаться|наш канал|прислать новость|новости|канал|наш|подпишись|вступай|переходи|наш чат|наша группа|источник|подробнее|смотрите также|наш сайт|наша группа|активная ссылка|в шапке профиля|в описании канала|для связи|по всем вопросам|пишите нам|звоните|успей|скидки|акция|предложение|специальное предложение|перейти по ссылке|жми|кликни|подробнее здесь|источник|первоисточник|канал|группа|паблик|наш телеграм|наш тг|наш тг-канал|наш телеграм-канал|подробнее в нашем канале|подробнее по ссылке|все самое интересное|не пропусти|будь в курсе|узнай первым|реклама|на правах рекламы|по вопросам сотрудничества)\b.*?(?:https?://[^\s)]+)?[\W_]*\s*$',
+        # Линии, которые очень короткие и содержат ссылку, например, "Источник: ссылка"
+        r'^\s*(?:источник|source|подробнее|details|link|ссылка|читать|read|join|присоединяйтесь|перейти|go)\s*[\W_]*https?://[^\s)]+[\W_]*\s*$',
+        # Линии, которые являются просто короткими призывами к действию или ссылками на социальные сети
+        r'^\s*[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*(?:@[\w_]+|t\.me/[\w_]+|vk\.com/[\w_]+|youtube\.com/[\w_]+|instagram\.com/[\w_]+|facebook\.com/[\w_]+)[\U0001F000-\U0001FFFF\U00002000-\U00002BFF\W_]*\s*$'
     ]
+
+    lines = text.split('\n')
+    cleaned_lines = []
     
-    # Компилируем regex для быстрого поиска
-    regex_pattern = r'\b(?:' + '|'.join(call_to_action_keywords) + r')\b'
-    call_to_action_regex = re.compile(regex_pattern, re.IGNORECASE)
-
-    # Ищем первый абзац с конца, который является призывом к действию
-    cut_index = len(paragraphs)
-    for i in range(len(paragraphs) - 1, -1, -1):
-        paragraph = paragraphs[i].strip()
+    # Идем с конца, удаляя рекламные строки.
+    # Это позволяет удалить блоки рекламных строк в конце поста.
+    i = len(lines) - 1
+    while i >= 0:
+        line = lines[i].strip()
+        is_promotional = False
+        for pattern in promotional_line_patterns:
+            # Используем re.fullmatch для проверки, является ли вся строка рекламной
+            if re.fullmatch(pattern, line, flags=re.IGNORECASE | re.DOTALL):
+                is_promotional = True
+                break
         
-        # Если абзац содержит ключевые слова призыва к действию
-        # ИЛИ короткий и содержит ссылки/хештеги (часто признак CTA)
-        if (call_to_action_regex.search(paragraph) or 
-            (len(paragraph.split()) < 15 and re.search(r'https?://\S+|t\.me/\S+|vk\.com/\S+|instagram\.com/\S+|@\w+|#\w+', paragraph, re.IGNORECASE))):
-            
-            # Проверяем, не является ли этот абзац частью основной новости
-            # путем поиска "безопасных" ключевых слов, которые обычно не встречаются в CTA
-            safe_keywords = [r'\d{2}\.\d{2}\.\d{4}', r'\d{1,2}:\d{2}', r'\bулица\b', r'\bрайон\b', r'\bгород\b', r'\bместо\b', r'\bпроисшествие\b', r'\bсобытие\b']
-            safe_regex = re.compile(r'\b(?:' + '|'.join(safe_keywords) + r')\b', re.IGNORECASE)
-
-            if not safe_regex.search(paragraph):
-                cut_index = i # Нашли точку обрезки
-                logger.info(f"Обнаружен абзац-призыв к действию: '{paragraph[:50]}...'")
-            else:
-                # Если абзац содержит безопасные слова, это, вероятно, не CTA,
-                # и мы не должны удалять его или предшествующие абзацы.
-                break 
+        if is_promotional:
+            i -= 1 # Если строка рекламная, удаляем ее и проверяем предыдущую
         else:
-            # Если текущий абзац не является призывом к действию, то и предыдущие абзацы,
-            # скорее всего, тоже не являются, так как призывы обычно идут в конце.
+            # Если строка не рекламная, то все предыдущие строки оставляем
+            cleaned_lines = lines[:i+1]
             break
-            
-    # Обрезаем список абзацев до найденного индекса
-    cleaned_paragraphs = paragraphs[:cut_index]
-            
-    return '\n\n'.join(cleaned_paragraphs).strip()
+    else: # Если весь текст состоял из рекламных строк
+        cleaned_lines = []
 
-def count_links(text: str) -> int:
-    """Подсчитывает количество URL-ссылок в тексте."""
-    # Более широкий regex для ссылок, включая t.me, vk.com, instagram.com и общие URL
-    url_pattern = r'https?://\S+|t\.me/\S+|vk\.com/\S+|instagram\.com/\S+|@\w+'
-    return len(re.findall(url_pattern, text, re.IGNORECASE))
+    return "\n".join(cleaned_lines).strip()
 
-async def process_new_donor_message(event):
+
+async def process_new_donor_message(
+    channel_id: int,
+    message_id: int,
+    text: str,
+    media_paths: list[str],
+    source_link: str
+):
     """
-    Обрабатывает новые сообщения от донорских каналов.
-    Проверяет на дубликаты, рекламный контент и переформулирует текст.
+    Обрабатывает новое сообщение, спарсенное из канала-донора.
+    Эта функция будет вызываться из `core/parser.py`.
     """
-    from core.deduplicator import deduplicator
-    from core.gigachat import gigachat_api
-    from bots.admin_bot import admin_bot
-
-    channel_id = event.chat_id
-    message_id = event.id
-    original_text = event.text
-    image_url = None
-    if event.photo:
-        image_url = event.photo.sizes[-1].url
-    elif event.video:
-        image_url = event.video.thumbs[-1].url if event.video.thumbs else None
-
     logger.info(f"Начало обработки нового сообщения от донора {channel_id}, ID: {message_id}")
 
-    async for session in get_session():
-        stmt_donor = select(DonorChannel).where(DonorChannel.telegram_id == channel_id)
-        donor_channel = (await session.execute(stmt_donor)).scalar_one_or_none()
+    async for session in get_session(): # <-- Используем get_session напрямую
+        # --- Начало костыля для обработки ID канала ---
+        # Telethon часто возвращает ID без префикса -100.
+        # Проверяем оба варианта: raw ID и ID с префиксом -100.
+        possible_donor_ids = [channel_id]
+        if channel_id > 0: # Если ID положительный, добавляем вариант с -100
+            possible_donor_ids.append(int(f"-100{channel_id}"))
+        elif str(channel_id).startswith('-100'): # Если уже с -100, добавляем raw ID
+            try:
+                possible_donor_ids.append(int(str(channel_id)[4:]))
+            except ValueError:
+                pass # Если не удалось преобразовать, игнорируем
+
+        # Находим донорский канал по любому из возможных ID
+        stmt_donor = select(DonorChannel).where(DonorChannel.telegram_id.in_(possible_donor_ids))
+        result_donor = await session.execute(stmt_donor)
+        donor_channel = result_donor.scalar_one_or_none()
+        # --- Конец костыля ---
 
         if not donor_channel:
             logger.warning(f"Сообщение от неизвестного донора (ID: {channel_id}). Пропускаем.")
             return
 
-        city = await session.get(City, donor_channel.city_id)
+        stmt_city = select(City).where(City.id == donor_channel.city_id)
+        result_city = await session.execute(stmt_city)
+        city = result_city.scalar_one_or_none()
+
         if not city:
-            logger.error(f"Город для донора {donor_channel.title} (ID: {donor_channel.id}) не найден. Пропускаем сообщение.")
+            logger.error(f"Городской канал для донора {donor_channel.title} (ID: {donor_channel.city_id}) не найден. Пропускаем.")
             return
 
-        # 1. Проверка на дубликаты
-        is_duplicate = await deduplicator.check_for_duplicates(original_text, city.id, session)
+        original_text = text # Сохраняем оригинальный текст для логирования и БД
+
+        # --- НОВАЯ ЛОГИКА ОБРАБОТКИ С МАСКОЙ ---
+        processed_text = original_text
+        
+        if not donor_channel.mask_pattern:
+            logger.info(f"Для донора '{donor_channel.title}' (ID: {donor_channel.telegram_id}) не задана маска. Пост отклонен.")
+            new_post = Post(
+                original_text=original_text,
+                processed_text=None,
+                image_url=media_paths[0] if media_paths else None,
+                source_link=source_link,
+                is_advertisement=False,
+                is_duplicate=False,
+                status="rejected_no_mask_defined", # Новый статус
+                donor_channel_id=donor_channel.id,
+                city_id=city.id,
+                original_message_id=message_id
+            )
+            session.add(new_post)
+            await session.commit()
+            return
+
+        try:
+            # Ищем совпадения с маской
+            match = re.search(donor_channel.mask_pattern, original_text, re.DOTALL | re.IGNORECASE)
+            
+            if not match:
+                logger.info(f"Пост от донора '{donor_channel.title}' (ID: {donor_channel.telegram_id}) не соответствует маске. Пост отклонен.")
+                new_post = Post(
+                    original_text=original_text,
+                    processed_text=None,
+                    image_url=media_paths[0] if media_paths else None,
+                    source_link=source_link,
+                    is_advertisement=False,
+                    is_duplicate=False,
+                    status="rejected_no_mask_match", # Новый статус
+                    donor_channel_id=donor_channel.id,
+                    city_id=city.id,
+                    original_message_id=message_id
+                )
+                session.add(new_post)
+                await session.commit()
+                return
+            
+            # Если маска совпала, удаляем найденный текст
+            processed_text = re.sub(donor_channel.mask_pattern, '', original_text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+            if not processed_text:
+                logger.warning(f"Текст поста (ID: {message_id}) стал пустым после применения маски. Пост отклонен.")
+                new_post = Post(
+                    original_text=original_text,
+                    processed_text=None,
+                    image_url=media_paths[0] if media_paths else None,
+                    source_link=source_link,
+                    is_advertisement=False,
+                    is_duplicate=False,
+                    status="rejected_empty_after_clean",
+                    donor_channel_id=donor_channel.id,
+                    city_id=city.id,
+                    original_message_id=message_id
+                )
+                session.add(new_post)
+                await session.commit()
+                return
+
+            # Добавляем кастомную подпись
+            # Формируем адрес канала: если есть username, используем его, иначе - t.me/c/ID
+            channel_address = f"https://t.me/{donor_channel.title.replace('@', '')}" if donor_channel.title.startswith('@') else f"https://t.me/c/{abs(donor_channel.telegram_id)}"
+            custom_signature = f"\n\n\t\t**❤️** **[Подпишись на {donor_channel.title.replace('@', '')}]({channel_address})**"
+            processed_text += custom_signature
+
+        except re.error as e:
+            logger.error(f"Ошибка регулярного выражения в маске для донора '{donor_channel.title}' (ID: {donor_channel.telegram_id}): {e}. Пост отклонен.")
+            new_post = Post(
+                original_text=original_text,
+                processed_text=None,
+                image_url=media_paths[0] if media_paths else None,
+                source_link=source_link,
+                is_advertisement=False,
+                is_duplicate=False,
+                status="rejected_mask_error", # Новый статус
+                donor_channel_id=donor_channel.id,
+                city_id=city.id,
+                original_message_id=message_id
+            )
+            session.add(new_post)
+            await session.commit()
+            return
+        except Exception as e:
+            logger.error(f"Неизвестная ошибка при обработке маски для донора '{donor_channel.title}': {e}. Пост отклонен.")
+            new_post = Post(
+                original_text=original_text,
+                processed_text=None,
+                image_url=media_paths[0] if media_paths else None,
+                source_link=source_link,
+                is_advertisement=False,
+                is_duplicate=False,
+                status="rejected_processing_error", # Новый статус
+                donor_channel_id=donor_channel.id,
+                city_id=city.id,
+                original_message_id=message_id
+            )
+            session.add(new_post)
+            await session.commit()
+            return
+        # --- КОНЕЦ НОВОЙ ЛОГИКИ С МАСКОЙ ---
+
+        # 1. Проверка на дубликат (теперь после обработки маской)
+        is_duplicate, reason = await deduplicator.check_for_duplicates(session, processed_text, city.id)
+
         if is_duplicate:
+            logger.info(f"Сообщение '{processed_text[:50]}...' является дубликатом. Причина: {reason}. Не публикуем.")
             new_post = Post(
                 original_text=original_text,
-                processed_text=original_text,
-                image_url=image_url,
+                processed_text=processed_text,
+                image_url=media_paths[0] if media_paths else None,
+                source_link=source_link,
                 is_duplicate=True,
-                status="rejected",
+                status="rejected_duplicate",
+                donor_channel_id=donor_channel.id,
                 city_id=city.id,
-                donor_channel_id=donor_channel.id
+                original_message_id=message_id
             )
             session.add(new_post)
             await session.commit()
-            logger.info(f"Сообщение от донора {channel_id}, ID: {message_id} является дубликатом. Пропускаем.")
             return
 
-        # 2. Проверка на количество ссылок
-        link_count = count_links(original_text)
-        if link_count > config.MAX_LINKS_IN_POST:
-            new_post = Post(
-                original_text=original_text,
-                processed_text=original_text,
-                image_url=image_url,
-                is_duplicate=False,
-                status="rejected", # Отклоняем из-за большого количества ссылок
-                city_id=city.id,
-                donor_channel_id=donor_channel.id
-            )
-            session.add(new_post)
-            await session.commit()
-            logger.info(f"Сообщение '{original_text[:50]}...' содержит {link_count} ссылок, что превышает лимит {config.MAX_LINKS_IN_POST}. Отклонено.")
-            await admin_bot.send_message(
-                chat_id=config.ADMIN_CHAT_ID,
-                text=f"🚫 **Пост отклонен из-за большого количества ссылок** в канале '{city.title}':\n\n"
-                     f"ID поста: `{new_post.id}`\n"
-                     f"Количество ссылок: {link_count} (лимит: {config.MAX_LINKS_IN_POST})\n"
-                     f"Текст:\n```\n{original_text[:1000]}\n```",
-                parse_mode="Markdown"
-            )
-            return
-
-        # 3. Проверка на рекламный контент
-        is_advertisement = await gigachat_api.check_advertisement(original_text)
-        if is_advertisement:
-            new_post = Post(
-                original_text=original_text,
-                processed_text=original_text,
-                image_url=image_url,
-                is_duplicate=False,
-                status="pending",
-                city_id=city.id,
-                donor_channel_id=donor_channel.id
-            )
-            session.add(new_post)
-            await session.commit()
-            logger.info(f"Сообщение '{original_text[:50]}...' является рекламным. Отправляем на ручную модерацию.")
-            await send_post_to_admin_panel(new_post, city.title, admin_bot)
-            return
-
-        # 4. Удаление рекламных ссылок
-        processed_text = remove_advertisement_links(original_text)
-        if not processed_text.strip():
-            logger.warning(f"Текст поста (ID: {message_id}) стал пустым после удаления рекламных ссылок. Пропускаем.")
-            return
-
-        # 5. Удаление призывов к действию в последних абзацах
-        processed_text = remove_call_to_action_paragraphs(processed_text)
-        if not processed_text.strip():
-            logger.warning(f"Текст поста (ID: {message_id}) стал пустым после удаления призывов к действию. Пропускаем.")
-            return
-
-        # 6. Переформулирование текста (если не содержит ключевых слов)
-        keywords = ["бпла", "ракетная опасность", "обстрел", "взрыв", "атака"]
-        if any(keyword in processed_text.lower() for keyword in keywords):
-            logger.info(f"Сообщение '{processed_text[:50]}...' содержит ключевые слова ({' или '.join(keywords)}). Переформулирование пропущено.")
-            final_text = processed_text
-        else:
-            final_text = await gigachat_api.rephrase_text(processed_text)
-            if not final_text:
-                logger.warning(f"Не удалось переформулировать текст для '{processed_text[:50]}...'. Используем оригинал.")
-                final_text = processed_text
-
-        # 7. Сохранение поста в БД
+        # 2. Сохранение поста в БД
         new_post = Post(
             original_text=original_text,
-            processed_text=final_text,
-            image_url=image_url,
+            processed_text=processed_text,
+            image_url=media_paths[0] if media_paths else None, # Сохраняем только первый путь для БД
+            source_link=source_link,
+            is_advertisement=False, # Теперь рекламность определяется маской
             is_duplicate=False,
             status="pending",
+            donor_channel_id=donor_channel.id,
             city_id=city.id,
-            donor_channel_id=donor_channel.id
+            original_message_id=message_id
         )
         session.add(new_post)
         await session.commit()
         logger.info(f"Новый пост (ID: {new_post.id}) сохранен в БД со статусом 'pending'.")
 
-        # 8. Публикация или отправка на модерацию
+        # 3. Публикация или отправка на модерацию
         if city.auto_mode:
-            await publish_post(new_post.id, city.telegram_id, session, [image_url] if image_url else [])
+            await publish_post(new_post.id, city.telegram_id, session, media_paths)
         else:
-            await send_post_to_admin_panel(new_post, city.title, admin_bot)
+            from bots.admin_bot import admin_bot
+            await send_post_to_admin_panel(new_post.id, city.telegram_id, session, media_paths)
 
-async def publish_post(post_id: int, target_telegram_channel_id: int, session: AsyncSession, media_paths: list = None):
+async def publish_post(post_id: int, target_telegram_channel_id: int, session: AsyncSession, media_paths: list[str]):
     """
-    Публикует пост в указанный Telegram канал.
-    Обновляет статус поста в БД.
+    Публикует пост в целевой Telegram канал.
+    :param post_id: ID поста в БД.
+    :param target_telegram_channel_id: Telegram ID канала, куда нужно отправить пост.
+    :param session: Сессия базы данных.
+    :param media_paths: Список путей к медиафайлам для публикации.
     """
-    from bots.admin_bot import admin_bot
+    stmt = select(Post).where(Post.id == post_id)
+    result = await session.execute(stmt)
+    post = result.scalar_one_or_none()
 
-    post = await session.get(Post, post_id)
     if not post:
-        logger.error(f"Пост ID {post_id} не найден для публикации.")
+        logger.error(f"Пост с ID {post_id} не найден для публикации.")
         return
 
     try:
-        if media_paths and media_paths[0]:
-            media_file_path = media_paths[0]
-            if os.path.exists(media_file_path):
-                if post.processed_text: # Убедимся, что текст не пустой
-                    if media_file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        await bot.send_photo(chat_id=target_telegram_channel_id, photo=types.FSInputFile(media_file_path), caption=post.processed_text, parse_mode="Markdown")
-                    elif media_file_path.lower().endswith(('.mp4', '.mov', '.avi')):
-                        await bot.send_video(chat_id=target_telegram_channel_id, video=types.FSInputFile(media_file_path), caption=post.processed_text, parse_mode="Markdown")
-                    else:
-                        logger.warning(f"Неподдерживаемый тип медиафайла для поста {post_id}: {media_file_path}. Отправляем только текст.")
-                        await bot.send_message(chat_id=target_telegram_channel_id, text=post.processed_text, parse_mode="Markdown")
-                else: # Если текст пустой, отправляем только медиа
-                    if media_file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        await bot.send_photo(chat_id=target_telegram_channel_id, photo=types.FSInputFile(media_file_path))
-                    elif media_file_path.lower().endswith(('.mp4', '.mov', '.avi')):
-                        await bot.send_video(chat_id=target_telegram_channel_id, video=types.FSInputFile(media_file_path))
-                    logger.warning(f"Текст поста {post_id} пустой. Отправлен только медиафайл.")
-            else:
-                logger.warning(f"Медиафайл не найден по пути {media_file_path} для поста {post_id}. Отправляем только текст.")
-                if post.processed_text:
-                    await bot.send_message(chat_id=target_telegram_channel_id, text=post.processed_text, parse_mode="Markdown")
+        message_to_send = post.processed_text
+
+        if media_paths:
+            first_media_path = media_paths[0]
+            if os.path.exists(first_media_path):
+                file_to_send = FSInputFile(first_media_path)
+                file_extension = os.path.splitext(first_media_path)[1].lower()
+
+                if file_extension in ['.jpg', '.jpeg', '.png', '.gif']:
+                    await bot.send_photo(chat_id=target_telegram_channel_id, photo=file_to_send, caption=message_to_send)
+                    logger.info(f"Фото для поста {post_id} успешно отправлено (первое из альбома).")
+                elif file_extension in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                    await bot.send_video(chat_id=target_telegram_channel_id, video=file_to_send, caption=message_to_send)
+                    logger.info(f"Видео для поста {post_id} успешно отправлено (первое из альбома).")
                 else:
-                    logger.warning(f"Пост {post_id} не имеет ни медиа, ни текста. Пропускаем публикацию.")
-                    return # Ничего не отправляем
-        else:
-            logger.info(f"Медиафайлы для поста {post_id} отсутствуют. Отправляем только текст.")
-            if post.processed_text:
-                await bot.send_message(chat_id=target_telegram_channel_id, text=post.processed_text, parse_mode="Markdown")
+                    logger.warning(f"Неизвестный тип первого медиафайла '{file_extension}' для поста {post.id}. Отправляем только текст.")
+                    await bot.send_message(chat_id=target_telegram_channel_id, text=message_to_send)
             else:
-                logger.warning(f"Пост {post_id} не имеет ни медиа, ни текста. Пропускаем публикацию.")
-                return # Ничего не отправляем
-        
+                logger.warning(f"Первый медиафайл '{first_media_path}' для поста {post.id} не найден. Отправляем только текст.")
+                await bot.send_message(chat_id=target_telegram_channel_id, text=message_to_send)
+
+            for i, media_path in enumerate(media_paths[1:]):
+                if os.path.exists(media_path):
+                    file_to_send = FSInputFile(media_path)
+                    file_extension = os.path.splitext(media_path)[1].lower()
+                    try:
+                        if file_extension in ['.jpg', '.jpeg', '.png', '.gif']:
+                            await bot.send_photo(chat_id=target_telegram_channel_id, photo=file_to_send)
+                            logger.info(f"Дополнительное фото для поста {post_id} успешно отправлено.")
+                        elif file_extension in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                            await bot.send_video(chat_id=target_telegram_channel_id, video=file_to_send)
+                            logger.info(f"Дополнительное видео для поста {post_id} успешно отправлено.")
+                        else:
+                            logger.warning(f"Неизвестный тип дополнительного медиафайла '{file_extension}' для поста {post.id}. Пропускаем.")
+                    except Exception as e:
+                        logger.warning(f"Ошибка при отправке дополнительного медиафайла {media_path} для поста {post.id}: {e}")
+                else:
+                    logger.warning(f"Дополнительный медиафайл '{media_path}' для поста {post.id} не найден. Пропускаем.")
+        else:
+            logger.info(f"Медиафайлы для поста {post.id} отсутствуют. Отправляем только текст.")
+            await bot.send_message(chat_id=target_telegram_channel_id, text=message_to_send)
+
         post.status = "published"
-        post.published_at = func.now()
+        post.published_at = datetime.datetime.now()
         await session.commit()
-        logger.info(f"Пост ID {post_id} успешно опубликован в канал {target_telegram_channel_id}.")
-
-    except TelegramBadRequest as e:
-        logger.error(f"Ошибка при публикации поста ID {post_id} в канал {target_telegram_channel_id}: {e}")
-        post.status = "failed_publication"
-        await session.commit()
-        await admin_bot.send_message(
-            chat_id=config.ADMIN_CHAT_ID,
-            text=f"⚠️ **Ошибка публикации поста ID {post.id}** в канал `{target_telegram_channel_id}`:\n`{e}`\n"
-                 f"Возможно, канал не существует, бот не является его администратором, или есть другая проблема с запросом. Пост помечен как 'failed_publication'.",
-            parse_mode="Markdown"
-        )
-    except TelegramForbiddenError as e:
-        logger.error(f"Бот был заблокирован или исключен из канала {target_telegram_channel_id} при публикации поста ID {post_id}: {e}")
-        post.status = "failed_publication"
-        await session.commit()
-        await admin_bot.send_message(
-            chat_id=config.ADMIN_CHAT_ID,
-            text=f"🚫 **Бот был заблокирован или исключен из канала `{target_telegram_channel_id}`** при попытке публикации поста ID {post.id}:\n`{e}`\n"
-                 f"Пост помечен как 'failed_publication'.",
-            parse_mode="Markdown"
-        )
+        logger.info(f"Пост ID {post.id} успешно опубликован в канал {target_telegram_channel_id}.")
     except Exception as e:
-        logger.error(f"Неизвестная ошибка при публикации поста ID {post_id} в канал {target_telegram_channel_id}: {e}")
-        post.status = "error"
+        logger.error(f"Ошибка при публикации поста ID {post.id} в канал {target_telegram_channel_id}: {e}")
+        post.status = "publish_error"
         await session.commit()
-        await admin_bot.send_message(
-            chat_id=config.ADMIN_CHAT_ID,
-            text=f"❌ **Неизвестная ошибка при публикации поста ID {post.id}** в канал `{target_telegram_channel_id}`:\n`{e}`\n"
-                 f"Пост помечен как 'error'.",
-            parse_mode="Markdown"
-        )
     finally:
-        if media_paths and media_paths[0] and os.path.exists(media_paths[0]):
-            os.remove(media_paths[0])
-            logger.info(f"Медиафайл {media_paths[0]} удален после публикации.")
+        for media_path in media_paths:
+            if os.path.exists(media_path):
+                try:
+                    os.remove(media_path)
+                    logger.info(f"Медиафайл {media_path} удален после публикации.")
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить медиафайл {media_path}: {e}")
 
 
-async def send_post_to_admin_panel(post: Post, city_title: str, admin_bot_instance: Bot):
+async def send_post_to_admin_panel(post_id: int, target_telegram_channel_id: int, session: AsyncSession, media_paths: list[str]):
     """
-    Отправляет пост на ручную модерацию в админ-чат.
+    Отправляет пост в админ-панель для ручной модерации.
+    Админ-бот должен быть настроен на получение этих сообщений.
     """
-    caption_text = (
-        f"**Новый пост для модерации в канале '{city_title}':**\n\n"
-        f"ID поста: `{post.id}`\n"
-        f"Исходный текст:\n```\n{post.original_text[:1000]}\n```\n\n"
-        f"Обработанный текст (для публикации):\n```\n{post.processed_text[:1000]}\n```\n\n"
-        f"Выберите действие:"
+    stmt = select(Post).where(Post.id == post_id)
+    result = await session.execute(stmt)
+    post = result.scalar_one_or_none()
+
+    if not post:
+        logger.error(f"Пост с ID {post.id} не найден для отправки в админ-панель.")
+        return
+
+    from bots.admin_bot import admin_bot
+
+    message_for_admin = (
+        f"🚨 *Новый пост для модерации* (ID: `{post.id}`)\n"
+        f"Канал назначения: `{target_telegram_channel_id}`\n"
+        f"Статус: {'Реклама' if post.is_advertisement else 'Ожидает'}\n\n"
+        f"Оригинал:\n`{post.original_text[:1000]}`\n\n" # Ограничиваем длину для удобства
+        f"Предложено:\n`{post.processed_text[:1000]}`\n" # Ограничиваем длину для удобства
     )
+    if post.is_advertisement:
+        message_for_admin += "\n_GigaChat пометил как рекламное._"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post.id}"),
-            InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"),
+            InlineKeyboardButton(text="✍️ Редактировать", callback_data=f"edit_{post.id}"), # Добавлена кнопка редактирования
             InlineKeyboardButton(text="♻️ Переформулировать", callback_data=f"rephrase_{post.id}"),
             InlineKeyboardButton(text="❌ Удалить", callback_data=f"delete_{post.id}")
         ]
     ])
 
     try:
-        if post.image_url and os.path.exists(post.image_url):
-            if post.processed_text:
-                if post.image_url.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    await admin_bot_instance.send_photo(
-                        chat_id=config.ADMIN_CHAT_ID,
-                        photo=types.FSInputFile(post.image_url),
-                        caption=caption_text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
+        if media_paths:
+            first_media_path = media_paths[0]
+            if os.path.exists(first_media_path):
+                file_to_send = FSInputFile(first_media_path)
+                file_extension = os.path.splitext(first_media_path)[1].lower()
+
+                if file_extension in ['.jpg', '.jpeg', '.png', '.gif']:
+                    await admin_bot.send_photo(chat_id=config.ADMIN_CHAT_ID, photo=file_to_send, caption=message_for_admin, parse_mode="Markdown")
                     logger.info(f"Фото для поста {post.id} отправлено в админ-чат (первое из альбома).")
-                elif post.image_url.lower().endswith(('.mp4', '.mov', '.avi')):
-                    await admin_bot_instance.send_video(
-                        chat_id=config.ADMIN_CHAT_ID,
-                        video=types.FSInputFile(post.image_url),
-                        caption=caption_text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
-                    logger.info(f"Видео для поста {post.id} отправлено в админ-чат.")
+                elif file_extension in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                    await admin_bot.send_video(chat_id=config.ADMIN_CHAT_ID, video=file_to_send, caption=message_for_admin, parse_mode="Markdown")
+                    logger.info(f"Видео для поста {post.id} отправлено в админ-чат (первое из альбома).")
                 else:
-                    logger.warning(f"Неподдерживаемый тип медиафайла для поста {post.id} в админ-панель: {post.image_url}. Отправляем только текст.")
-                    await admin_bot_instance.send_message(
-                        chat_id=config.ADMIN_CHAT_ID,
-                        text=caption_text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
-            else: # Если текст пустой, отправляем только медиа
-                if post.image_url.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    await admin_bot_instance.send_photo(
-                        chat_id=config.ADMIN_CHAT_ID,
-                        photo=types.FSInputFile(post.image_url),
-                        reply_markup=keyboard
-                    )
-                elif post.image_url.lower().endswith(('.mp4', '.mov', '.avi')):
-                    await admin_bot_instance.send_video(
-                        chat_id=config.ADMIN_CHAT_ID,
-                        video=types.FSInputFile(post.image_url),
-                        reply_markup=keyboard
-                    )
-                logger.warning(f"Текст поста {post.id} пустой для админ-панели. Отправлен только медиафайл.")
+                    logger.warning(f"Неизвестный тип первого медиафайла '{file_extension}' для поста {post.id}. Отправляем только текст в админ-чат.")
+                    await admin_bot.send_message(chat_id=config.ADMIN_CHAT_ID, text=message_for_admin, reply_markup=keyboard, parse_mode="Markdown")
+            else:
+                logger.warning(f"Первый медиафайл '{first_media_path}' для поста {post.id} не найден. Отправляем только текст в админ-чат.")
+                await admin_bot.send_message(chat_id=config.ADMIN_CHAT_ID, text=message_for_admin, reply_markup=keyboard, parse_mode="Markdown")
+
+            for i, media_path in enumerate(media_paths[1:]):
+                if os.path.exists(media_path):
+                    file_to_send = FSInputFile(media_path)
+                    file_extension = os.path.splitext(media_path)[1].lower()
+                    try:
+                        if file_extension in ['.jpg', '.jpeg', '.png', '.gif']:
+                            await admin_bot.send_photo(chat_id=config.ADMIN_CHAT_ID, photo=file_to_send)
+                            logger.info(f"Дополнительное фото для поста {post.id} отправлено в админ-чат.")
+                        elif file_extension in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                            await admin_bot.send_video(chat_id=config.ADMIN_CHAT_ID, video=file_to_send)
+                            logger.info(f"Дополнительное видео для поста {post.id} отправлено в админ-чат.")
+                        else:
+                            logger.warning(f"Неизвестный тип дополнительного медиафайла '{file_extension}' для поста {post.id}. Пропускаем при отправке в админ-чат.")
+                    except Exception as e:
+                        logger.warning(f"Ошибка при отправке дополнительного медиафайла {media_path} для поста {post.id} в админ-чат: {e}")
+                else:
+                    logger.warning(f"Дополнительный медиафайл '{media_path}' для поста {post.id} не найден. Пропускаем при отправке в админ-чат.")
+            
+            await admin_bot.send_message(chat_id=config.ADMIN_CHAT_ID, text="Выберите действие:", reply_markup=keyboard)
+
+
         else:
-            await admin_bot_instance.send_message(
-                chat_id=config.ADMIN_CHAT_ID,
-                text=caption_text,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
+            logger.info(f"Медиафайлы для поста {post.id} отсутствуют. Отправляем только текст в админ-чат.")
+            await admin_bot.send_message(chat_id=config.ADMIN_CHAT_ID, text=message_for_admin, reply_markup=keyboard, parse_mode="Markdown")
+
         logger.info(f"Пост ID {post.id} успешно отправлен в админ-панель для модерации.")
     except Exception as e:
         logger.error(f"Ошибка при отправке поста ID {post.id} в админ-панель: {e}")
 
+
+# Запуск бота
 async def start_news_bot():
-    """Запускает основного Telegram бота."""
     logger.info("Запуск основного Telegram бота...")
-    # Удаляем вебхук перед запуском long polling
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Вебхук основного бота успешно удален.")
-    except Exception as e:
-        logger.warning(f"Не удалось удалить вебхук основного бота: {e}")
     await dp.start_polling(bot)
     logger.info("Основной Telegram бот остановлен.")
 
 if __name__ == "__main__":
     async def debug_main():
-        class MockTelethonClient:
-            def __init__(self):
-                self._connected = False
-            async def start(self): self._connected = True
-            async def disconnect(self): self._connected = False
-            def is_connected(self): return self._connected
-            async def get_entity(self, identifier):
-                if identifier == "@test_channel" or identifier == "-1001234567890":
-                    class MockChannel:
-                        id = 1234567890
-                        title = "Тестовый Канал"
-                    return MockChannel()
-                raise UsernameNotOccupiedError("Test error")
-
-        class MockTelegramParser:
-            def __init__(self):
-                self.client = MockTelethonClient()
-            def add_message_handler(self, handler_func): pass
-            async def start(self): await self.client.start()
-            async def stop(self): await self.client.disconnect()
-
-        mock_parser = MockTelegramParser()
-        await mock_parser.start()
-        await set_telegram_parser_instance_for_news_bot(mock_parser)
-
-        from db.database import init_db
-        await init_db()
-
-        async for session in get_session():
-            test_city = await session.execute(select(City).where(City.telegram_id == -1002705093365))
-            test_city = test_city.scalar_one_or_none()
-            if not test_city:
-                test_city = City(telegram_id=-1002705093365, title="Тестовый Город", auto_mode=True)
-                session.add(test_city)
-                await session.commit()
-                logger.info("Добавлен тестовый город для отладки.")
-            
-            test_donor = await session.execute(select(DonorChannel).where(DonorChannel.telegram_id == 1481151436))
-            test_donor = test_donor.scalar_one_or_none()
-            if not test_donor:
-                test_donor = DonorChannel(telegram_id=1481151436, title="Тестовый Донор", city_id=test_city.id)
-                session.add(test_donor)
-                await session.commit()
-                logger.info("Добавлен тестовый донор для отладки.")
-
         await start_news_bot()
     asyncio.run(debug_main())

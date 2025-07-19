@@ -13,7 +13,7 @@ class Config:
     BOT_TOKEN: str = os.getenv("BOT_TOKEN")
     ADMIN_BOT_TOKEN: str = os.getenv("ADMIN_BOT_TOKEN")
 
-    # GigaChat API ключи
+    # GigaChat API ключи (оставляем для совместимости, но не используем, если отключено)
     GIGACHAT_CLIENT_ID: str = os.getenv("GIGACHAT_CLIENT_ID")
     GIGACHAT_CLIENT_SECRET: str = os.getenv("GIGACHAT_CLIENT_SECRET")
     GIGACHAT_AUTH_KEY: str = os.getenv("GIGACHAT_AUTH_KEY") # Base64(client_id:client_secret)
@@ -26,9 +26,13 @@ class Config:
     # Telethon API ID и Hash
     TELETHON_API_ID: int = int(os.getenv("API_ID"))
     TELETHON_API_HASH: str = os.getenv("API_HASH")
+    PHONE_NUMBER: str = os.getenv("PHONE_NUMBER") # <-- НОВОЕ: Добавлен номер телефона для Telethon
 
     # ID чата администратора для модерации
     ADMIN_CHAT_ID: int = int(os.getenv("ADMIN_CHAT_ID"))
+
+    # Пользовательская подпись для постов
+    CUSTOM_SIGNATURE: str = os.getenv("CUSTOM_SIGNATURE", "") # <-- ОБНОВЛЕНО: Пользовательская подпись
 
     def __init__(self):
         self._validate_config()
@@ -37,11 +41,15 @@ class Config:
         """Проверяет наличие всех необходимых переменных окружения."""
         required_vars = [
             "BOT_TOKEN", "ADMIN_BOT_TOKEN",
-            "GIGACHAT_CLIENT_ID", "GIGACHAT_CLIENT_SECRET", "GIGACHAT_AUTH_KEY", "RQUUID",
             "POSTGRES_URL",
-            "TELETHON_API_ID", "TELETHON_API_HASH", # ИСПРАВЛЕНО: Изменены на фактические имена атрибутов
+            "TELETHON_API_ID", "TELETHON_API_HASH",
+            "PHONE_NUMBER", # <-- НОВОЕ: Добавлен в обязательные переменные
             "ADMIN_CHAT_ID"
         ]
+        # GigaChat переменные теперь опциональны, если GigaChat отключен
+        if os.getenv("GIGACHAT_ENABLED", "true").lower() == "true": # Пример флага для включения/выключения GigaChat
+             required_vars.extend(["GIGACHAT_CLIENT_ID", "GIGACHAT_CLIENT_SECRET", "GIGACHAT_AUTH_KEY", "RQUUID"])
+
         for var in required_vars:
             if not getattr(Config, var):
                 logger.error(f"Переменная окружения {var} не установлена. Проверьте ваш .env файл.")
@@ -57,6 +65,9 @@ if __name__ == "__main__":
         logger.info(f"BOT_TOKEN (первые 5 символов): {config.BOT_TOKEN[:5]}...")
         logger.info(f"POSTGRES_URL: {config.POSTGRES_URL}")
         logger.info(f"TELETHON_API_ID: {config.TELETHON_API_ID}")
+        logger.info(f"TELETHON_API_HASH: {config.TELETHON_API_HASH[:5]}...")
+        logger.info(f"PHONE_NUMBER: {config.PHONE_NUMBER}")
         logger.info(f"ADMIN_CHAT_ID: {config.ADMIN_CHAT_ID}")
+        logger.info(f"CUSTOM_SIGNATURE: {config.CUSTOM_SIGNATURE}")
     except ValueError as e:
         logger.error(f"Ошибка конфигурации: {e}")
