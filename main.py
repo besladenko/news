@@ -8,19 +8,21 @@ from bot import start_bot
 from admin_bot import start_admin_bot
 
 def run_in_thread(fn):
+    """Запускает функцию в отдельном потоке-демоне."""
     t = Thread(target=fn, daemon=True)
     t.start()
     return t
 
 async def main():
+    # 1. Инициализация базы данных
     await init_db()
-    # Запускать парсер Telegram в отдельном потоке
+    # 2. Запуск парсера Telegram в отдельном потоке
     run_in_thread(start_parser)
-    # Запуск бота для пользователей
+    # 3. Запуск бота для пользователей (публикатора)
     run_in_thread(start_bot)
-    # Запуск бота для админов
+    # 4. Запуск бота для админов
     run_in_thread(start_admin_bot)
-    # Ждать бесконечно
+    # 5. Ждать бесконечно (чтобы main не завершился)
     while True:
         await asyncio.sleep(3600)
 
