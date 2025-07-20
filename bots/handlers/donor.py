@@ -8,16 +8,16 @@ from sqlalchemy.future import select
 
 router = Router()
 
-# FSM для добавления донора
+# FSM для добавления и обновления донора
 class AddDonorState(StatesGroup):
     waiting_for_city = State()
     waiting_for_donor_link = State()
     waiting_for_mask = State()
+    waiting_for_mask_update_confirm = State()  # Новое состояние для подтверждения обновления
 
 # Старт: пользователь нажал "Добавить донора" в меню
 @router.message(F.text == "Добавить донора")
 async def start_add_donor(message: types.Message, state: FSMContext):
-    # Подгружаем список городов из БД для выбора
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(City))
         cities = result.scalars().all()
@@ -26,7 +26,6 @@ async def start_add_donor(message: types.Message, state: FSMContext):
         await message.answer("Нет добавленных городов. Сначала добавьте хотя бы один канал.")
         return
 
-    # Делаем инлайн-клавиатуру для выбора города
     buttons = [
         [types.InlineKeyboardButton(text=city.title, callback_data=f"adddonor_city_{city.id}")]
         for city in cities
@@ -60,18 +59,16 @@ async def donor_link_received(message: types.Message, state: FSMContext):
     )
     await state.set_state(AddDonorState.waiting_for_mask)
 
-# Пользователь прислал маску (она сохраняется как есть)
+# Пользователь прислал маску (она сохраняется как есть, либо предложит обновить)
 @router.message(StateFilter(AddDonorState.waiting_for_mask))
 async def donor_mask_received(message: types.Message, state: FSMContext):
     data = await state.get_data()
     city_id = data["city_id"]
     link = data["donor_link"]
     mask = message.text.strip()
-
     channel_id = link.split("/")[-1]
 
     async with AsyncSessionLocal() as session:
-        # --- Проверка на дубликат по channel_id ---
         result = await session.execute(
             select(DonorChannel).where(
                 DonorChannel.channel_id == channel_id,
@@ -80,14 +77,24 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
         )
         existing_donor = result.scalar_one_or_none()
         if existing_donor:
-            await message.answer(
-                "Такой донор уже добавлен к этому каналу!",
-                parse_mode="HTML"
+            # Донор уже есть — спрашиваем, обновлять ли маску
+            await state.update_data(mask=mask)
+            await state.update_data(existing_donor_id=existing_donor.id)
+            kb = types.ReplyKeyboardMarkup(
+                keyboard=[
+                    [types.KeyboardButton(text="Да"), types.KeyboardButton(text="Нет")]
+                ],
+                resize_keyboard=True
             )
-            await state.clear()
+            await message.answer(
+                f"У этого донора уже есть маска:\n<code>{existing_donor.mask_pattern}</code>\n\nОбновить маску на новую?",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            await state.set_state(AddDonorState.waiting_for_mask_update_confirm)
             return
 
-        # --- Добавление донора только если его нет ---
+        # --- Добавление нового донора ---
         donor = DonorChannel(
             title=link,
             channel_id=channel_id,
@@ -96,9 +103,13 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
         )
         session.add(donor)
         await session.commit()
-
         await message.answer(
             f"Донор <b>{link}</b> добавлен к городу с маской:\n<code>{mask}</code>",
             parse_mode="HTML"
         )
     await state.clear()
+
+# Обработка подтверждения обновления маски
+@router.message(StateFilter(AddDonorState.waiting_for_mask_update_confirm), F.text.in_(["Да", "Нет"]))
+async def mask_update_confirm(message: types.Message, state: FSMContext):
+    data = await state.get_data()_
