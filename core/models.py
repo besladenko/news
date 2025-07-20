@@ -1,42 +1,54 @@
-from sqlalchemy.orm import DeclarativeBase, mapped_column, Mapped, relationship
-from sqlalchemy import Integer, String, Boolean, ForeignKey
+from sqlalchemy import (
+    Column, Integer, String, Boolean, ForeignKey, DateTime, Text
+)
+from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import declarative_base, relationship
+import datetime
 
-class Base(DeclarativeBase):
-    pass
+Base = declarative_base()
 
 class City(Base):
     __tablename__ = "city"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    channel_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    link: Mapped[str] = mapped_column(String, nullable=False)
-    auto_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    channel_id = Column(String, unique=True, nullable=False)
+    link = Column(String, nullable=False)
+    auto_mode = Column(Boolean, default=False)
+
+    donors = relationship("DonorChannel", back_populates="city")
+    posts = relationship("Post", back_populates="city")
 
 class DonorChannel(Base):
     __tablename__ = "donor_channel"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    channel_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("city.id"))
-    mask_pattern: Mapped[str] = mapped_column(String, nullable=True)
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    channel_id = Column(String, unique=True, nullable=False)
+    city_id = Column(Integer, ForeignKey("city.id"), nullable=False)
+    mask_pattern = Column(String, nullable=True)
+
+    city = relationship("City", back_populates="donors")
+    posts = relationship("Post", back_populates="donor")
 
 class Post(Base):
     __tablename__ = "post"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    donor_id: Mapped[int] = mapped_column(Integer, ForeignKey("donor_channel.id"))
-    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("city.id"))
-    original_text: Mapped[str] = mapped_column(String)
-    processed_text: Mapped[str] = mapped_column(String)
-    media_path: Mapped[str] = mapped_column(String)
-    source_link: Mapped[str] = mapped_column(String)
-    is_ad: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
-    status: Mapped[str] = mapped_column(String)
-    created_at: Mapped[str] = mapped_column(String)
-    published_at: Mapped[str] = mapped_column(String)
+    id = Column(Integer, primary_key=True)
+    donor_id = Column(Integer, ForeignKey("donor_channel.id"))
+    city_id = Column(Integer, ForeignKey("city.id"))
+    original_text = Column(Text, nullable=False)
+    processed_text = Column(Text, nullable=True)
+    media_path = Column(String, nullable=True)
+    source_link = Column(String, nullable=True)
+    is_ad = Column(Boolean, default=False)
+    is_duplicate = Column(Boolean, default=False)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    published_at = Column(DateTime, nullable=True)
+
+    donor = relationship("DonorChannel", back_populates="posts")
+    city = relationship("City", back_populates="posts")
 
 class Admin(Base):
     __tablename__ = "admin"
-    tg_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    username: Mapped[str] = mapped_column(String)
-    is_super: Mapped[bool] = mapped_column(Boolean, default=False)
+    tg_id = Column(Integer, primary_key=True)
+    username = Column(String, nullable=True)
+    is_super = Column(Boolean, default=False)

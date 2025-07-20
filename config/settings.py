@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     TG_API_ID: int
@@ -6,10 +6,14 @@ class Settings(BaseSettings):
     NEWS_BOT_TOKEN: str
     ADMIN_BOT_TOKEN: str
     POSTGRES_DSN: str
+    GIGACHAT_CLIENT_ID: str
+    GIGACHAT_CLIENT_SECRET: str
     SIMILARITY_THRESHOLD: float = 0.82
     MEDIA_ROOT: str = "/var/lib/setinews_media"
     DONOR_CACHE_TTL_MIN: int = 10
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
 
 settings = Settings()
