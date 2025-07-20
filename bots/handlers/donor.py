@@ -9,7 +9,6 @@ import re
 
 router = Router()
 
-# Главное меню (импортируй из city.py если у тебя отдельный файл)
 admin_main_kb = types.ReplyKeyboardMarkup(
     keyboard=[
         [types.KeyboardButton(text="Добавить канал")],
@@ -22,30 +21,27 @@ admin_main_kb = types.ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# --- FSM состояния для добавления донора ---
 class AddDonorState(StatesGroup):
     waiting_for_city = State()
     waiting_for_donor_link = State()
     waiting_for_mask = State()
 
-# --- FSM состояния для изменения маски ---
 class EditMaskState(StatesGroup):
     waiting_for_city = State()
     waiting_for_donor = State()
     waiting_for_new_mask = State()
 
-# --- FSM для тестовой публикации по маске ---
 class FindByMaskState(StatesGroup):
     waiting_for_city = State()
     waiting_for_donor = State()
 
-# --- Добавить донора ---
 @router.message(F.text == "Добавить донора")
 async def start_add_donor(message: types.Message, state: FSMContext):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(City))
         cities = result.scalars().all()
     if not cities:
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer("Нет добавленных городов. Сначала добавьте хотя бы один канал.",
                             reply_markup=admin_main_kb)
         return
@@ -54,6 +50,7 @@ async def start_add_donor(message: types.Message, state: FSMContext):
         for city in cities
     ]
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer("Выберите канал, к которому добавить донора:", reply_markup=kb)
     await state.set_state(AddDonorState.waiting_for_city)
 
@@ -61,6 +58,7 @@ async def start_add_donor(message: types.Message, state: FSMContext):
 async def city_chosen(callback: types.CallbackQuery, state: FSMContext):
     city_id = int(callback.data.replace("adddonor_city_", ""))
     await state.update_data(city_id=city_id)
+    await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await callback.message.answer("Пришлите ссылку на канал-донора:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(AddDonorState.waiting_for_donor_link)
     await callback.answer()
@@ -69,12 +67,14 @@ async def city_chosen(callback: types.CallbackQuery, state: FSMContext):
 async def donor_link_received(message: types.Message, state: FSMContext):
     link = message.text.strip()
     if not link.startswith("https://t.me/"):
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer("Ошибка! Пришлите ссылку на канал-донора в формате https://t.me/...",
                             reply_markup=admin_main_kb)
         await state.clear()
         return
 
     await state.update_data(donor_link=link)
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
         "Пришлите маску для обработки постов из этого донора (можно с markdown):",
         reply_markup=types.ReplyKeyboardRemove()
@@ -98,6 +98,7 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
         )
         existing_donor = result.scalar_one_or_none()
         if existing_donor:
+            await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
             await message.answer(
                 "Такой донор уже добавлен к этому каналу!",
                 reply_markup=admin_main_kb,
@@ -114,6 +115,7 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
         )
         session.add(donor)
         await session.commit()
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer(
             f"Донор <b>{link}</b> добавлен к городу с маской:\n<code>{mask}</code>",
             parse_mode="HTML",
@@ -121,13 +123,13 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
         )
     await state.clear()
 
-# --- Изменить маску донора ---
 @router.message(F.text == "Изменить маску донора")
 async def start_edit_mask(message: types.Message, state: FSMContext):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(City))
         cities = result.scalars().all()
     if not cities:
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer("Нет городов.", reply_markup=admin_main_kb)
         return
 
@@ -136,6 +138,7 @@ async def start_edit_mask(message: types.Message, state: FSMContext):
         for city in cities
     ]
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer("Выберите город:", reply_markup=kb)
     await state.set_state(EditMaskState.waiting_for_city)
 
@@ -147,6 +150,7 @@ async def choose_donor_city(callback: types.CallbackQuery, state: FSMContext):
         result = await session.execute(select(DonorChannel).where(DonorChannel.city_id == city_id))
         donors = result.scalars().all()
     if not donors:
+        await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await callback.message.answer("В этом городе нет доноров.", reply_markup=admin_main_kb)
         await state.clear()
         await callback.answer()
@@ -157,6 +161,7 @@ async def choose_donor_city(callback: types.CallbackQuery, state: FSMContext):
         for donor in donors
     ]
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await callback.message.answer("Выберите донора:", reply_markup=kb)
     await state.set_state(EditMaskState.waiting_for_donor)
     await callback.answer()
@@ -167,6 +172,7 @@ async def prompt_new_mask(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(donor_id=donor_id)
     async with AsyncSessionLocal() as session:
         donor = await session.get(DonorChannel, donor_id)
+    await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await callback.message.answer(
         f"Текущая маска:\n<code>{donor.mask_pattern}</code>\n\nВведите новую маску:",
         parse_mode="HTML",
@@ -184,6 +190,7 @@ async def update_mask(message: types.Message, state: FSMContext):
         donor = await session.get(DonorChannel, donor_id)
         donor.mask_pattern = new_mask
         await session.commit()
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
         f"Маска донора обновлена:\n<code>{new_mask}</code>",
         parse_mode="HTML",
@@ -191,13 +198,13 @@ async def update_mask(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# --- Найти по маске и опубликовать ---
 @router.message(F.text == "Найти по маске и опубликовать")
 async def start_find_by_mask(message: types.Message, state: FSMContext):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(City))
         cities = result.scalars().all()
     if not cities:
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer("Нет городов.", reply_markup=admin_main_kb)
         return
     buttons = [
@@ -205,6 +212,7 @@ async def start_find_by_mask(message: types.Message, state: FSMContext):
         for city in cities
     ]
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer("Выберите город:", reply_markup=kb)
     await state.set_state(FindByMaskState.waiting_for_city)
 
@@ -216,6 +224,7 @@ async def find_by_mask_choose_donor(callback: types.CallbackQuery, state: FSMCon
         result = await session.execute(select(DonorChannel).where(DonorChannel.city_id == city_id))
         donors = result.scalars().all()
     if not donors:
+        await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await callback.message.answer("В этом городе нет доноров.", reply_markup=admin_main_kb)
         await state.clear()
         await callback.answer()
@@ -225,6 +234,7 @@ async def find_by_mask_choose_donor(callback: types.CallbackQuery, state: FSMCon
         for donor in donors
     ]
     kb = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await callback.message.answer("Выберите донора:", reply_markup=kb)
     await state.set_state(FindByMaskState.waiting_for_donor)
     await callback.answer()
@@ -242,7 +252,6 @@ async def find_and_publish(callback: types.CallbackQuery, state: FSMContext):
     mask_pattern = donor.mask_pattern
     donor_channel_id = donor.channel_id
 
-    # -- Для реального поиска используем Telethon (или бери из своей БД, если ты парсишь посты в Post)
     from telethon import TelegramClient
     from config.settings import settings
 
@@ -260,12 +269,14 @@ async def find_and_publish(callback: types.CallbackQuery, state: FSMContext):
         await news_bot.send_message(
             city.channel_id, found.text
         )
+        await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await callback.message.answer(
             f"Новость найдена и опубликована:\n\n{found.text[:2000]}",
             parse_mode="HTML",
             reply_markup=admin_main_kb
         )
     else:
+        await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await callback.message.answer("Новость по маске не найдена в последних 50 постах.", reply_markup=admin_main_kb)
     await state.clear()
     await callback.answer()

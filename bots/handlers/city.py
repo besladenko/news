@@ -1,50 +1,51 @@
 from aiogram import Router, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from sqlalchemy.future import select
 from core.models import City
 from infra.db import AsyncSessionLocal
+from sqlalchemy.future import select
 
 router = Router()
 
-# Главное меню для админа
 admin_main_kb = types.ReplyKeyboardMarkup(
     keyboard=[
         [types.KeyboardButton(text="Добавить канал")],
         [types.KeyboardButton(text="Добавить донора")],
+        [types.KeyboardButton(text="Изменить маску донора")],
+        [types.KeyboardButton(text="Найти по маске и опубликовать")],
         [types.KeyboardButton(text="Показать список каналов")],
         [types.KeyboardButton(text="Модерация: вкл")],
     ],
     resize_keyboard=True
 )
 
-# FSM-состояния для добавления канала
-class AddChannelState(StatesGroup):
+class AddCityState(StatesGroup):
     waiting_for_link = State()
 
-# Главное меню по /start
 @router.message(Command("start"))
-async def start_menu(message: types.Message):
+async def start_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
         "Привет! Я бот для работы с каналами в Telegram.\nВыбери действие:",
         reply_markup=admin_main_kb
     )
 
-# Кнопка: Добавить канал
 @router.message(F.text == "Добавить канал")
-async def fsm_add_channel_start(message: types.Message, state: FSMContext):
+async def add_city_handler(message: types.Message, state: FSMContext):
+    await state.set_state(AddCityState.waiting_for_link)
+    await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
-        "Пришли ссылку на канал:",
+        "Пришли ссылку на канал (например, https://t.me/your_channel):",
         reply_markup=types.ReplyKeyboardRemove()
     )
-    await state.set_state(AddChannelState.waiting_for_link)
 
-# Пользователь прислал ссылку на канал — проверяем и добавляем
-@router.message(StateFilter(AddChannelState.waiting_for_link))
-async def fsm_add_channel_link(message: types.Message, state: FSMContext):
+@router.message(AddCityState.waiting_for_link)
+async def process_city_link(message: types.Message, state: FSMContext):
     link = message.text.strip()
     if not link.startswith("https://t.me/"):
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer(
             "Ошибка! Пришли ссылку на канал в формате https://t.me/...",
             reply_markup=admin_main_kb
@@ -53,25 +54,30 @@ async def fsm_add_channel_link(message: types.Message, state: FSMContext):
         return
 
     channel_id = link.split("/")[-1]
-
     async with AsyncSessionLocal() as session:
-        # Проверка на дубликат по channel_id
         result = await session.execute(select(City).where(City.channel_id == channel_id))
-        existing_city = result.scalar_one_or_none()
-        if existing_city:
+        exists = result.scalar_one_or_none()
+        if exists:
+            await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
             await message.answer(
-                "Такой канал уже добавлен в сетку!",
+                "Канал уже есть в базе!",
                 reply_markup=admin_main_kb
             )
             await state.clear()
             return
 
-        # Добавление нового города
-        city = City(title=link, channel_id=channel_id, link=link)
+        city = City(
+            title=link,
+            channel_id=channel_id,
+            link=link,
+            auto_mode=False
+        )
         session.add(city)
         await session.commit()
+        await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer(
-            f"Городской канал добавлен!\ncity_id: {city.id}",
+            f"Канал <b>{link}</b> добавлен!",
+            parse_mode="HTML",
             reply_markup=admin_main_kb
         )
     await state.clear()
