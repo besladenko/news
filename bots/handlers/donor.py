@@ -26,6 +26,13 @@ def clean_mask(mask: str) -> str:
     mask = re.sub(r"[\u200b\u200c\u200d\uFEFF]", "", mask or "")
     return mask.strip()
 
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r"[\u200b\u200c\u200d\uFEFF]", "", text)
+    return text.strip()
+
 class AddDonorState(StatesGroup):
     waiting_for_city = State()
     waiting_for_donor_link = State()
@@ -123,7 +130,7 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
         await session.commit()
         await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
         await message.answer(
-            f"Донор <b>{link}</b> добавлен к городу с маской:\n<pre>{repr(mask)}</pre>",
+            f"Донор <b>{link}</b> добавлен к городу с маской:\n<pre>{repr(mask)}</pre>\nHEX: <code>{mask.encode().hex()}</code>",
             parse_mode="HTML",
             reply_markup=admin_main_kb
         )
@@ -180,7 +187,7 @@ async def prompt_new_mask(callback: types.CallbackQuery, state: FSMContext):
         donor = await session.get(DonorChannel, donor_id)
     await callback.message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await callback.message.answer(
-        f"Текущая маска:\n<pre>{repr(donor.mask_pattern)}</pre>\n\nВведите новую маску:",
+        f"Текущая маска:\n<pre>{repr(donor.mask_pattern)}</pre>\nHEX: <code>{donor.mask_pattern.encode().hex()}</code>\n\nВведите новую маску:",
         parse_mode="HTML",
         reply_markup=types.ReplyKeyboardRemove()
     )
@@ -199,7 +206,7 @@ async def update_mask(message: types.Message, state: FSMContext):
         await session.commit()
     await message.answer(".", reply_markup=types.ReplyKeyboardRemove())
     await message.answer(
-        f"Маска донора обновлена:\n<pre>{repr(new_mask)}</pre>",
+        f"Маска донора обновлена:\n<pre>{repr(new_mask)}</pre>\nHEX: <code>{new_mask.encode().hex()}</code>",
         parse_mode="HTML",
         reply_markup=admin_main_kb
     )
@@ -256,7 +263,7 @@ async def find_and_publish(callback: types.CallbackQuery, state: FSMContext):
         donor = await session.get(DonorChannel, donor_id)
         city = await session.get(City, city_id)
 
-    mask_pattern = clean_mask(donor.mask_pattern)
+    mask_pattern = normalize_text(donor.mask_pattern)
     donor_channel_id = donor.channel_id
 
     from telethon import TelegramClient
@@ -269,12 +276,14 @@ async def find_and_publish(callback: types.CallbackQuery, state: FSMContext):
         for msg in messages:
             if not msg.text:
                 continue
-            # Безопасная проверка и лог ошибки RegExp
+            text_to_search = normalize_text(msg.text)
+            # Для отладки HEX сравнения — показываем оба значения
+            # await callback.message.answer(f"MASK: {mask_pattern.encode().hex()}\nMSG: {text_to_search.encode().hex()}")
             if not isinstance(mask_pattern, str) or not mask_pattern.strip():
                 await callback.message.answer("Маска для этого донора не указана.", reply_markup=admin_main_kb)
                 break
             try:
-                if re.search(mask_pattern, msg.text, flags=re.DOTALL):
+                if re.search(mask_pattern, text_to_search, flags=re.DOTALL):
                     found = msg
                     break
             except re.error as e:
