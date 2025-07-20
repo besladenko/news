@@ -6,15 +6,17 @@ from core.processor import process_post
 from bots.news_bot import bot as news_bot
 from loguru import logger
 import asyncio
+from sqlalchemy import select  # добавлено!
 
 async def start_telethon_watcher():
     client = TelegramClient('parser', settings.TG_API_ID, settings.TG_API_HASH)
     await client.start()
     logger.info("Telethon client started.")
 
-    # Получаем все донорские каналы
+    # Получаем все донорские каналы КОРРЕКТНО!
     async with AsyncSessionLocal() as session:
-        donors = (await session.execute(DonorChannel.__table__.select())).scalars().all()
+        result = await session.execute(select(DonorChannel))
+        donors = result.scalars().all()
     donor_ids = [donor.channel_id for donor in donors]
 
     # Переводим channel_id к username для Telethon (важно, если channel_id = username, иначе нужен peer id!)
