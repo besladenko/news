@@ -287,16 +287,13 @@ async def find_and_publish(callback: types.CallbackQuery, state: FSMContext):
         for msg in messages:
             if not msg.text:
                 continue
-            # Очищаем подпись
             cleaned_text = remove_signature_from_end(msg.text, mask_pattern)
-            # Если исходный текст != очищенному, значит нашли подпись
             if cleaned_text != normalize_text(msg.text):
                 found = (msg, cleaned_text)
                 break
 
     if found:
         from bots.news_bot import bot as news_bot
-        # Публикуем уже очищенный текст!
         await news_bot.send_message(
             city.channel_id, found[1]
         )
