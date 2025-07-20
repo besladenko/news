@@ -1,6 +1,7 @@
 import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from bots.handlers.donor import remove_signature_from_end
 
 AD_PHRASES = [
     "реклама", "подписывайся", "подпишись", "акция", "скидка", "магазин"
@@ -8,7 +9,7 @@ AD_PHRASES = [
 
 def apply_mask(text: str, mask_pattern: str):
     """
-    Если маска задана, режем подписи и прочее.
+    Если маска задана, режем подписи и прочее (Устарело!).
     """
     if not mask_pattern:
         return text
@@ -39,3 +40,19 @@ def is_duplicate(text: str, prev_texts: list, threshold: float) -> bool:
 
 def add_signature(text: str, city_title: str):
     return f"{text}\n\n— {city_title}"
+
+def process_post(text: str, donor, city_title: str = "") -> str:
+    """
+    Главная функция для обработки текста перед публикацией:
+    - чистим подпись (маску) по новому алгоритму (remove_signature_from_end)
+    - можно добавить другие фильтры (ads, dedup, paraphrase)
+    - добавляем подпись города (опционально)
+    """
+    if donor.mask_pattern:
+        # Удаляем маску/подпись с конца текста!
+        text = remove_signature_from_end(text, donor.mask_pattern)
+    # Можно добавить рекламу/dedup/paraphrase
+    # text = paraphrase(text) ...
+    if city_title:
+        text = add_signature(text, city_title)
+    return text

@@ -10,7 +10,8 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 async def main():
     await init_db()
-    await start_telethon()
+    # Запуск telethon-парсера как фоновой задачи
+    telethon_task = asyncio.create_task(start_telethon())
     logger.info("Telethon client running.")
 
     # Стартуем оба бота как asyncio задачи!
@@ -19,7 +20,8 @@ async def main():
         asyncio.create_task(admin_dp.start_polling(admin_bot)),
     ]
 
-    await asyncio.gather(*bot_tasks)
+    # Ожидание всех задач (боты + telethon)
+    await asyncio.gather(telethon_task, *bot_tasks)
 
 if __name__ == "__main__":
     asyncio.run(main())
