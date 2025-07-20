@@ -2,13 +2,13 @@ from aiogram import Router, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 from core.models import City
 from infra.db import AsyncSessionLocal
 
 router = Router()
 
-# Главное меню (ReplyKeyboard)
+# Главное меню для админа
 admin_main_kb = types.ReplyKeyboardMarkup(
     keyboard=[
         [types.KeyboardButton(text="Добавить канал")],
@@ -19,18 +19,19 @@ admin_main_kb = types.ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Состояния FSM
+# FSM-состояния для добавления канала
 class AddChannelState(StatesGroup):
     waiting_for_link = State()
 
+# Главное меню по /start
 @router.message(Command("start"))
 async def start_menu(message: types.Message):
     await message.answer(
-        "Привет! Я бот для работы с каналами в Telegram.",
+        "Привет! Я бот для работы с каналами в Telegram.\nВыбери действие:",
         reply_markup=admin_main_kb
     )
 
-# Запуск сценария добавления канала
+# Кнопка: Добавить канал
 @router.message(F.text == "Добавить канал")
 async def fsm_add_channel_start(message: types.Message, state: FSMContext):
     await message.answer(
@@ -39,11 +40,10 @@ async def fsm_add_channel_start(message: types.Message, state: FSMContext):
     )
     await state.set_state(AddChannelState.waiting_for_link)
 
-# Приём ссылки и добавление в БД
+# Пользователь прислал ссылку на канал — проверяем и добавляем
 @router.message(StateFilter(AddChannelState.waiting_for_link))
 async def fsm_add_channel_link(message: types.Message, state: FSMContext):
     link = message.text.strip()
-    # Быстрая проверка на валидность ссылки (упрощённо)
     if not link.startswith("https://t.me/"):
         await message.answer(
             "Ошибка! Пришли ссылку на канал в формате https://t.me/...",
@@ -53,8 +53,21 @@ async def fsm_add_channel_link(message: types.Message, state: FSMContext):
         return
 
     channel_id = link.split("/")[-1]
-    city = City(title=link, channel_id=channel_id, link=link)
+
     async with AsyncSessionLocal() as session:
+        # Проверка на дубликат по channel_id
+        result = await session.execute(select(City).where(City.channel_id == channel_id))
+        existing_city = result.scalar_one_or_none()
+        if existing_city:
+            await message.answer(
+                "Такой канал уже добавлен в сетку!",
+                reply_markup=admin_main_kb
+            )
+            await state.clear()
+            return
+
+        # Добавление нового города
+        city = City(title=link, channel_id=channel_id, link=link)
         session.add(city)
         await session.commit()
         await message.answer(
