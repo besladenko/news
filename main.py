@@ -3,7 +3,7 @@
 import asyncio
 from threading import Thread
 from models import init_db
-from parsing import start_parser
+from parse import start_parser
 from bot import start_bot
 from admin_bot import start_admin_bot
 
