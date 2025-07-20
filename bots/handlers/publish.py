@@ -1,5 +1,5 @@
-from aiogram import Router, types
-from aiogram.filters import Command
+from aiogram import Router, types, F
+from aiogram.filters import StateFilter, Command
 from sqlalchemy.future import select
 from core.models import Post, City
 from infra.db import AsyncSessionLocal
@@ -13,7 +13,6 @@ async def publish_handler(message: types.Message):
         await message.answer("Использование: /publish <code>&lt;post_id&gt;</code>")
         return
 
-
     post_id = int(args[1])
     async with AsyncSessionLocal() as session:
         post = await session.get(Post, post_id)
@@ -23,7 +22,5 @@ async def publish_handler(message: types.Message):
         post.status = "published"
         await session.commit()
 
-        # Получаем канал города
         city = await session.get(City, post.city_id)
-        # Тут — логика отправки в канал города (через Telethon или через Bot)
         await message.answer(f"Пост опубликован в: {city.link}")
