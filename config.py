@@ -1,31 +1,18 @@
-# … начало файла без изменений …
+# config.py
 
-class Config:
-    # -----------------------------------------------------------------
-    # База данных (как было)
-    DATABASE_URL: str | None = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
-    POSTGRES_URL: str | None = DATABASE_URL
+import os
+from dotenv import load_dotenv
+from pathlib import Path
 
-    # -----------------------------------------------------------------
-    # Telegram боты (как было)
-    BOT_TOKEN: str | None       = os.getenv("BOT_TOKEN")
-    ADMIN_BOT_TOKEN: str | None = os.getenv("ADMIN_BOT_TOKEN")
-    ADMIN_CHAT_ID: str | None   = os.getenv("ADMIN_CHAT_ID")
+load_dotenv()
 
-    # -----------------------------------------------------------------
-    # Telethon
-    API_ID: int | None   = os.getenv("API_ID")
-    API_HASH: str | None = os.getenv("API_HASH")
-    PHONE_NUMBER: str | None = os.getenv("PHONE_NUMBER")
+API_ID               = int(os.getenv("TG_API_ID", 0))
+API_HASH             = os.getenv("TG_API_HASH", "")
+NEWS_BOT_TOKEN       = os.getenv("NEWS_BOT_TOKEN", "")
+ADMIN_BOT_TOKEN      = os.getenv("ADMIN_BOT_TOKEN", "")
+POSTGRES_DSN         = os.getenv("POSTGRES_DSN", "postgresql+asyncpg://user:pass@localhost/db")
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.82"))
+MEDIA_ROOT           = Path(os.getenv("MEDIA_ROOT", "media"))
+DONOR_CACHE_TTL_MIN  = int(os.getenv("DONOR_CACHE_TTL_MIN", "10"))
 
-    # 🔽  Новый блок‑алиас, чтобы старый код не падал
-    TELETHON_API_ID: int | None   = API_ID
-    TELETHON_API_HASH: str | None = API_HASH
-
-    # -----------------------------------------------------------------
-    # GigaChat (как было)
-    GIGACHAT_CLIENT_ID: str | None     = os.getenv("GIGACHAT_CLIENT_ID")
-    GIGACHAT_CLIENT_SECRET: str | None = os.getenv("GIGACHAT_CLIENT_SECRET")
-    GIGACHAT_AUTH_KEY: str | None      = os.getenv("GIGACHAT_AUTH_KEY")
-    GIGACHAT_SCOPE: str | None         = os.getenv("GIGACHAT_SCOPE")
-    RQUUID: str | None                 = os.getenv("RQUUID")
+MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
