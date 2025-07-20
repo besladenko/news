@@ -10,8 +10,9 @@ async def add_donor_handler(message: types.Message):
     # Пример: /adddonor 1 https://t.me/source_channel "(?i)❤️.*$"
     args = message.text.split(maxsplit=3)
     if len(args) < 3:
-        await message.answer("Использование: /adddonor <city_id> <ссылка> [маска]")
+        await message.answer("Использование: /adddonor <code>&lt;city_id&gt; &lt;ссылка&gt; [маска]</code>")
         return
+
 
     city_id = int(args[1])
     link = args[2]
