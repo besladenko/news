@@ -6,7 +6,7 @@ from core.processor import process_post
 from bots.news_bot import bot as news_bot
 from loguru import logger
 import asyncio
-from sqlalchemy import select  # добавлено!
+from sqlalchemy import select
 
 async def start_telethon_watcher():
     client = TelegramClient('parser', settings.TG_API_ID, settings.TG_API_HASH)
@@ -19,25 +19,27 @@ async def start_telethon_watcher():
         donors = result.scalars().all()
     donor_ids = [donor.channel_id for donor in donors]
 
-    # Переводим channel_id к username для Telethon (важно, если channel_id = username, иначе нужен peer id!)
     @client.on(events.NewMessage(chats=donor_ids))
     async def handler(event):
-        # event.chat.username не всегда гарантирован!
         donor_id = event.chat.username or event.chat.id or str(event.chat)
         text = event.text or ""
         async with AsyncSessionLocal() as session:
-            # Ищем донора по username или channel_id (важно для приватных/публичных каналов)
-            donor = (await session.execute(
-                DonorChannel.__table__.select().where(
+            # ПРАВИЛЬНО: ищем донора ORM-запросом!
+            result = await session.execute(
+                select(DonorChannel).where(
                     (DonorChannel.channel_id == donor_id) | (DonorChannel.channel_id == str(event.chat.id))
                 )
-            )).scalar_one_or_none()
+            )
+            donor = result.scalar_one_or_none()
             if not donor:
                 logger.warning(f"Unknown donor: {donor_id}")
                 return
-            city = (await session.execute(
-                City.__table__.select().where(City.id == donor.city_id)
-            )).scalar_one_or_none()
+
+            # ПРАВИЛЬНО: ищем город ORM-запросом!
+            result = await session.execute(
+                select(City).where(City.id == donor.city_id)
+            )
+            city = result.scalar_one_or_none()
             if not city:
                 logger.warning(f"Unknown city for donor: {donor_id}")
                 return
