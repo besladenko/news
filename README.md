@@ -36,3 +36,6 @@
 - **DonorChannel** — канал-доnor
 - **Post** — новостной пост
 - **Admin** — админ
+wget -qO- https://github.com/besladenko/news/archive/refs/heads/main.tar.gz | tar xz --strip-components=1 
+source .venv/bin/activate
+python3 main.py
