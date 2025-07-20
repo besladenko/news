@@ -70,18 +70,35 @@ async def donor_mask_received(message: types.Message, state: FSMContext):
 
     channel_id = link.split("/")[-1]
 
-    donor = DonorChannel(
-        title=link,
-        channel_id=channel_id,
-        city_id=city_id,
-        mask_pattern=mask
-    )
     async with AsyncSessionLocal() as session:
+        # --- Проверка на дубликат по channel_id ---
+        result = await session.execute(
+            select(DonorChannel).where(
+                DonorChannel.channel_id == channel_id,
+                DonorChannel.city_id == city_id
+            )
+        )
+        existing_donor = result.scalar_one_or_none()
+        if existing_donor:
+            await message.answer(
+                "Такой донор уже добавлен к этому каналу!",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+
+        # --- Добавление донора только если его нет ---
+        donor = DonorChannel(
+            title=link,
+            channel_id=channel_id,
+            city_id=city_id,
+            mask_pattern=mask
+        )
         session.add(donor)
         await session.commit()
 
-    await message.answer(
-        f"Донор <b>{link}</b> добавлен к городу с маской:\n<code>{mask}</code>",
-        parse_mode="HTML"
-    )
+        await message.answer(
+            f"Донор <b>{link}</b> добавлен к городу с маской:\n<code>{mask}</code>",
+            parse_mode="HTML"
+        )
     await state.clear()
